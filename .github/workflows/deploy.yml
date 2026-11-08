@@ -1,7 +1,7 @@
 name: Build & deploy to Firebase Hosting
 on:
   push:
-    branches: [main]
+    branches: [main, ccr-0bd4d265-xul9ab]
   workflow_dispatch:
 jobs:
   deploy:
