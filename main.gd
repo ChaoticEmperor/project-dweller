@@ -36,6 +36,19 @@ var recoil := 0.0
 var dead := false
 var hurt_flash := 0.0
 var started := false
+# touch controls
+var touch_mode := false
+var touch_ui: Control
+var stick_base: ColorRect
+var stick_knob: ColorRect
+var stick_id := -1
+var stick_origin := Vector2.ZERO
+var stick_vec := Vector2.ZERO
+var look_id := -1
+var buttons := {}      # name -> ColorRect
+var btn_held := {}     # name -> touch index
+var dash_req := false
+var fs_btn: ColorRect
 
 func mat(c: Color) -> StandardMaterial3D:
 	var k := c.to_html()
@@ -69,7 +82,7 @@ func _ready() -> void:
 	build_world()
 	build_player()
 	build_hud()
-	center.text = "ZOMBIE BONK\nClick to start"
+	center.text = "ZOMBIE BONK\n%s to start" % ("Tap" if touch_mode else "Click")
 
 # ---------------- WORLD ----------------
 func build_world() -> void:
@@ -183,45 +196,157 @@ func build_player() -> void:
 	flash.material_override.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	flash.visible = false
 
+func label(parent: Node, txt: String, size: int) -> Label:
+	var l := Label.new()
+	l.text = txt
+	l.add_theme_font_size_override("font_size", size)
+	l.add_theme_color_override("font_outline_color", Color.BLACK)
+	l.add_theme_constant_override("outline_size", 4)
+	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	parent.add_child(l)
+	return l
+
+func make_btn(parent: Node, txt: String, sz: Vector2) -> ColorRect:
+	var r := ColorRect.new()
+	r.color = Color(1, 1, 1, 0.18)
+	r.size = sz
+	r.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	parent.add_child(r)
+	var l := label(r, txt, 14)
+	l.size = sz
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	return r
+
 func build_hud() -> void:
 	var layer := CanvasLayer.new()
 	add_child(layer)
-	hud = Label.new()
-	hud.position = Vector2(6, 4)
-	hud.add_theme_font_size_override("font_size", 10)
-	hud.add_theme_color_override("font_outline_color", Color.BLACK)
-	hud.add_theme_constant_override("outline_size", 3)
-	layer.add_child(hud)
-	cross = Label.new()
-	cross.text = "+"
-	cross.add_theme_font_size_override("font_size", 12)
-	cross.position = Vector2(196, 104)
-	layer.add_child(cross)
-	center = Label.new()
+	hud = label(layer, "", 14)
+	hud.position = Vector2(8, 6)
+	cross = label(layer, "+", 18)
+	center = label(layer, "", 24)
 	center.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	center.size = Vector2(400, 40)
-	center.position = Vector2(0, 60)
-	center.add_theme_font_size_override("font_size", 16)
-	center.add_theme_color_override("font_outline_color", Color.BLACK)
-	center.add_theme_constant_override("outline_size", 4)
-	layer.add_child(center)
+	fs_btn = make_btn(layer, "FULL", Vector2(52, 26))
+	touch_ui = Control.new()
+	touch_ui.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	layer.add_child(touch_ui)
+	stick_base = ColorRect.new()
+	stick_base.color = Color(1, 1, 1, 0.12)
+	stick_base.size = Vector2(110, 110)
+	stick_base.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	touch_ui.add_child(stick_base)
+	stick_knob = ColorRect.new()
+	stick_knob.color = Color(1, 1, 1, 0.35)
+	stick_knob.size = Vector2(44, 44)
+	stick_knob.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	touch_ui.add_child(stick_knob)
+	buttons["fire"] = make_btn(touch_ui, "FIRE", Vector2(84, 84))
+	buttons["fire"].color = Color(1, 0.3, 0.2, 0.3)
+	buttons["jump"] = make_btn(touch_ui, "JUMP", Vector2(60, 46))
+	buttons["dash"] = make_btn(touch_ui, "DASH", Vector2(60, 46))
+	buttons["reload"] = make_btn(touch_ui, "RELOAD", Vector2(64, 30))
+	buttons["view"] = make_btn(touch_ui, "VIEW", Vector2(52, 26))
+	touch_mode = DisplayServer.is_touchscreen_available()
+	get_viewport().size_changed.connect(layout)
+	layout()
+
+func layout() -> void:
+	var vs := get_viewport().get_visible_rect().size
+	cross.position = vs / 2 - Vector2(5, 12)
+	center.size = Vector2(vs.x, 100)
+	center.position = Vector2(0, vs.y * 0.25)
+	fs_btn.position = Vector2(vs.x - 60, 6)
+	buttons["view"].position = Vector2(vs.x - 120, 6)
+	stick_base.position = Vector2(30, vs.y - 140)
+	reset_stick()
+	buttons["fire"].position = Vector2(vs.x - 110, vs.y - 120)
+	buttons["jump"].position = Vector2(vs.x - 180, vs.y - 70)
+	buttons["dash"].position = Vector2(vs.x - 180, vs.y - 130)
+	buttons["reload"].position = Vector2(vs.x - 100, vs.y - 165)
+	touch_ui.visible = touch_mode
+
+func reset_stick() -> void:
+	stick_id = -1
+	stick_vec = Vector2.ZERO
+	stick_knob.position = stick_base.position + stick_base.size / 2 - stick_knob.size / 2
+
+func toggle_fullscreen() -> void:
+	if DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_FULLSCREEN:
+		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+	else:
+		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
+
+func in_rect(r: Control, p: Vector2) -> bool:
+	return Rect2(r.position, r.size).grow(8).has_point(p)
+
+func begin_game() -> void:
+	if dead:
+		get_tree().reload_current_scene()
+	elif not started:
+		started = true
+		next_wave()
+
+func _input(ev: InputEvent) -> void:
+	if ev is InputEventScreenTouch:
+		if not touch_mode:
+			touch_mode = true
+			layout()
+		var p: Vector2 = ev.position
+		if ev.pressed:
+			if in_rect(fs_btn, p):
+				toggle_fullscreen()
+				return
+			if not started or dead:
+				begin_game()
+				return
+			for n in buttons:
+				if in_rect(buttons[n], p):
+					btn_held[n] = ev.index
+					match n:
+						"dash": dash_req = true
+						"reload": start_reload()
+						"view": toggle_view()
+					return
+			if p.x < get_viewport().get_visible_rect().size.x * 0.45 and stick_id == -1:
+				stick_id = ev.index
+				stick_origin = p
+			elif look_id == -1:
+				look_id = ev.index
+		else:
+			if ev.index == stick_id:
+				reset_stick()
+			if ev.index == look_id:
+				look_id = -1
+			for n in btn_held.keys():
+				if btn_held[n] == ev.index:
+					btn_held.erase(n)
+	elif ev is InputEventScreenDrag:
+		if ev.index == stick_id:
+			var off: Vector2 = (ev.position - stick_origin).limit_length(50)
+			stick_vec = off / 50.0
+			stick_knob.position = stick_base.position + stick_base.size / 2 - stick_knob.size / 2 + off
+		elif ev.index == look_id and not dead:
+			player.rotate_y(-ev.relative.x * 0.008)
+			pivot.rotation.x = clamp(pivot.rotation.x - ev.relative.y * 0.008, -1.4, 1.4)
 
 func _unhandled_input(ev: InputEvent) -> void:
 	if ev is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not dead:
 		player.rotate_y(-ev.relative.x * 0.003)
 		pivot.rotation.x = clamp(pivot.rotation.x - ev.relative.y * 0.003, -1.4, 1.4)
 	if ev is InputEventMouseButton and ev.pressed:
+		if in_rect(fs_btn, ev.position) and Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
+			toggle_fullscreen()
+			return
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 		if not started:
-			started = true
-			next_wave()
+			begin_game()
 	if ev is InputEventKey and ev.pressed and not ev.echo:
 		match ev.keycode:
 			KEY_ESCAPE: Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 			KEY_V: toggle_view()
 			KEY_R: start_reload()
-			KEY_ENTER:
-				if dead: get_tree().reload_current_scene()
+			KEY_F: toggle_fullscreen()
+			KEY_ENTER: begin_game()
 
 func toggle_view() -> void:
 	third_person = not third_person
@@ -237,7 +362,7 @@ func _physics_process(dt: float) -> void:
 	if not started:
 		return
 	if dead:
-		center.text = "YOU GOT BONKED!\nScore %d  -  Wave %d\n[Enter] to try again" % [score, wave]
+		center.text = "YOU GOT BONKED!\nScore %d  -  Wave %d\n%s to try again" % [score, wave, "Tap" if touch_mode else "[Enter]"]
 		return
 	# movement
 	var inp := Vector2.ZERO
@@ -245,19 +370,22 @@ func _physics_process(dt: float) -> void:
 	if Input.is_key_pressed(KEY_S): inp.y += 1
 	if Input.is_key_pressed(KEY_A): inp.x -= 1
 	if Input.is_key_pressed(KEY_D): inp.x += 1
-	var dir := (player.transform.basis * Vector3(inp.x, 0, inp.y)).normalized()
+	inp += stick_vec
+	inp = inp.limit_length(1.0)
+	var dir := (player.transform.basis * Vector3(inp.x, 0, inp.y))
 	var speed := 9.0
 	dash_cd -= dt
-	if Input.is_key_pressed(KEY_SHIFT) and dash_cd <= 0 and dir != Vector3.ZERO:
+	if (Input.is_key_pressed(KEY_SHIFT) or dash_req) and dash_cd <= 0 and dir != Vector3.ZERO:
 		dash_t = 0.18
 		dash_cd = 0.8
+	dash_req = false
 	if dash_t > 0:
 		dash_t -= dt
 		speed = 28.0
 	player.velocity.x = dir.x * speed
 	player.velocity.z = dir.z * speed
 	if player.is_on_floor():
-		if Input.is_key_pressed(KEY_SPACE):
+		if Input.is_key_pressed(KEY_SPACE) or btn_held.has("jump"):
 			player.velocity.y = 8.0
 	else:
 		player.velocity.y -= 22.0 * dt
@@ -273,7 +401,7 @@ func _physics_process(dt: float) -> void:
 		if reloading <= 0:
 			ammo = 8
 			gun.rotation.x = 0
-	elif Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and fire_cd <= 0:
+	elif (Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) or btn_held.has("fire")) and fire_cd <= 0:
 		if ammo > 0:
 			shoot()
 		else:
@@ -306,9 +434,9 @@ func _physics_process(dt: float) -> void:
 
 	update_zombies(dt)
 	hurt_flash = max(hurt_flash - dt, 0)
-	hud.text = "HP %d   AMMO %d/8%s\nSCORE %d   WAVE %d%s\n[V] view  [Shift] dash  [R] reload" % [
+	hud.text = "HP %d   AMMO %d/8%s\nSCORE %d   WAVE %d%s%s" % [
 		int(hp), ammo, "  RELOADING" if reloading > 0 else "", score, wave,
-		("   COMBO x%d!" % combo) if combo > 1 else ""]
+		("   COMBO x%d!" % combo) if combo > 1 else "", "" if touch_mode else "\n[V] view  [Shift] dash  [R] reload  [F] fullscreen"]
 	hud.add_theme_color_override("font_color", Color(1, 0.3, 0.3) if hurt_flash > 0 else Color.WHITE)
 
 func shoot() -> void:
