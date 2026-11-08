@@ -1,0 +1,13 @@
+{
+  "hosting": {
+    "public": "web",
+    "ignore": ["firebase.json", "**/.*"],
+    "headers": [
+      { "source": "**/*.wasm", "headers": [
+        { "key": "Content-Type", "value": "application/wasm" },
+        { "key": "Cache-Control", "value": "public, max-age=3600" } ] },
+      { "source": "**/*.pck", "headers": [
+        { "key": "Cache-Control", "value": "no-cache" } ] }
+    ]
+  }
+}

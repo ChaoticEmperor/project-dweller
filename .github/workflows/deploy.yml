@@ -1,0 +1,28 @@
+name: Build & deploy to Firebase Hosting
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Godot 4.3 + export templates
+        run: |
+          wget -q https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_linux.x86_64.zip
+          wget -q https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_export_templates.tpz
+          unzip -q Godot_v4.3-stable_linux.x86_64.zip
+          mkdir -p ~/.local/share/godot/export_templates/4.3.stable
+          unzip -qj Godot_v4.3-stable_export_templates.tpz 'templates/web*' -d ~/.local/share/godot/export_templates/4.3.stable
+      - name: Export web build
+        run: |
+          mkdir -p web
+          ./Godot_v4.3-stable_linux.x86_64 --headless --import || true
+          ./Godot_v4.3-stable_linux.x86_64 --headless --export-release Web web/index.html
+          test -f web/index.wasm
+      - uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          channelId: live
