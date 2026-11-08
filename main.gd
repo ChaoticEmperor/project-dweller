@@ -35,6 +35,7 @@ var shake := 0.0
 var recoil := 0.0
 var dead := false
 var hurt_flash := 0.0
+var started := false
 
 func mat(c: Color) -> StandardMaterial3D:
 	var k := c.to_html()
@@ -68,8 +69,7 @@ func _ready() -> void:
 	build_world()
 	build_player()
 	build_hud()
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-	next_wave()
+	center.text = "ZOMBIE BONK\nClick to start"
 
 # ---------------- WORLD ----------------
 func build_world() -> void:
@@ -212,6 +212,9 @@ func _unhandled_input(ev: InputEvent) -> void:
 		pivot.rotation.x = clamp(pivot.rotation.x - ev.relative.y * 0.003, -1.4, 1.4)
 	if ev is InputEventMouseButton and ev.pressed:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+		if not started:
+			started = true
+			next_wave()
 	if ev is InputEventKey and ev.pressed and not ev.echo:
 		match ev.keycode:
 			KEY_ESCAPE: Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
@@ -231,6 +234,8 @@ func start_reload() -> void:
 		reloading = 0.9
 
 func _physics_process(dt: float) -> void:
+	if not started:
+		return
 	if dead:
 		center.text = "YOU GOT BONKED!\nScore %d  -  Wave %d\n[Enter] to try again" % [score, wave]
 		return
