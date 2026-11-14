@@ -1,25 +1,37 @@
 extends Node3D
 # Zombie Bonk - a fast, goofy, pixelated zombie shooter.
-# Everything is built in code so the project stays tiny.
+# main.gd owns the game rules: player, gun, zombies, waves, scoring.
+# Everything else lives in a module:
+#   world.gd    - the city (roads, buildings, subway entrances)
+#   clutter.gd  - street props
+#   fx.gd       - lighting, sky and visual effects
+#   hud.gd      - 2D UI and touch-control visuals
+#   controls.gd - keyboard/mouse/touch input
+#   layout.gd   - shared map dimensions and zombie path helper
+#   build.gd    - shared box-building helpers
+const B = preload("res://build.gd")
+const L = preload("res://layout.gd")
 
 const NAMES := ["Zombie McBite-Face", "Gary", "Brainy Bob", "Sir Groans-a-Lot", "Chompers",
 	"Moaning Myrtle-ish", "Undead Ted", "Lil' Rotty", "Karen (Deceased)", "Big Steve"]
 const SHIRTS := [Color(0.7, 0.1, 0.15), Color(0.1, 0.5, 0.5), Color(0.8, 0.6, 0.1), Color(0.4, 0.2, 0.6)]
+const MAX_AMMO := 8
+
+var world: Node3D
+var clutter: Node3D
+var fx: Node3D
+var hud: CanvasLayer
+var controls: Node
 
 var player: CharacterBody3D
 var cam: Camera3D
 var pivot: Node3D
 var gun: Node3D
-var flash: MeshInstance3D
 var body_mesh: Node3D
-var hud: Label
-var center: Label
-var cross: Label
 var zombies: Array = []
-var mats := {}
 
 var hp := 100.0
-var ammo := 8
+var ammo := MAX_AMMO
 var reloading := 0.0
 var fire_cd := 0.0
 var score := 0
@@ -30,136 +42,68 @@ var to_spawn := 0
 var spawn_t := 0.0
 var dash_t := 0.0
 var dash_cd := 0.0
+var dash_req := false
 var third_person := false
-var shake := 0.0
 var recoil := 0.0
 var dead := false
 var hurt_flash := 0.0
 var started := false
-# touch controls
-var touch_mode := false
-var touch_ui: Control
-var stick_base: ColorRect
-var stick_knob: ColorRect
-var stick_id := -1
-var stick_origin := Vector2.ZERO
-var stick_vec := Vector2.ZERO
-var look_id := -1
-var buttons := {}      # name -> ColorRect
-var btn_held := {}     # name -> touch index
-var dash_req := false
-var fs_btn: ColorRect
-var look_delta := Vector2.ZERO   # accumulated touch look, applied once per frame
-var sens_level := 2              # 1..5, shown on the SENS button
-var move_vel := Vector2.ZERO     # smoothed horizontal velocity
-const SENS := [0.0, 1.2, 1.8, 2.5, 3.3, 4.2]  # radians per full screen-width swipe
-
-func mat(c: Color) -> StandardMaterial3D:
-	var k := c.to_html()
-	if not mats.has(k):
-		var m := StandardMaterial3D.new()
-		m.albedo_color = c
-		m.roughness = 1.0
-		mats[k] = m
-	return mats[k]
-
-func box(parent: Node, size: Vector3, pos: Vector3, c: Color, collide := false) -> MeshInstance3D:
-	var mi := MeshInstance3D.new()
-	var bm := BoxMesh.new()
-	bm.size = size
-	mi.mesh = bm
-	mi.material_override = mat(c)
-	mi.position = pos
-	parent.add_child(mi)
-	if collide:
-		var sb := StaticBody3D.new()
-		var cs := CollisionShape3D.new()
-		var sh := BoxShape3D.new()
-		sh.size = size
-		cs.shape = sh
-		sb.add_child(cs)
-		mi.add_child(sb)
-	return mi
+var move_vel := Vector2.ZERO
 
 func _ready() -> void:
 	randomize()
-	build_world()
+	world = preload("res://world.gd").new()
+	add_child(world)
+	world.build()
+	clutter = preload("res://clutter.gd").new()
+	add_child(clutter)
+	clutter.build()
 	build_player()
-	build_hud()
-	center.text = "ZOMBIE BONK\n%s to start" % ("Tap" if touch_mode else "Click")
+	fx = preload("res://fx.gd").new()
+	add_child(fx)
+	fx.setup(cam)
+	fx.attach_gun(gun)
+	fx.add_street_lights(clutter.lamp_positions())
+	hud = preload("res://hud.gd").new()
+	add_child(hud)
+	hud.build()
+	controls = preload("res://controls.gd").new()
+	add_child(controls)
+	controls.setup(hud)
+	controls.dash.connect(func(): dash_req = true)
+	controls.reload.connect(start_reload)
+	controls.toggle_view.connect(toggle_view)
+	controls.start_pressed.connect(begin_game)
+	hud.show_title()
+	_debug_args()
 
-# ---------------- WORLD ----------------
-func build_world() -> void:
-	var env := WorldEnvironment.new()
-	var e := Environment.new()
-	var sky := Sky.new()
-	var sm := ProceduralSkyMaterial.new()
-	sm.sky_top_color = Color(0.3, 0.55, 0.95)
-	sm.sky_horizon_color = Color(0.75, 0.85, 0.95)
-	sm.ground_horizon_color = Color(0.5, 0.6, 0.4)
-	sky.sky_material = sm
-	e.background_mode = Environment.BG_SKY
-	e.sky = sky
-	e.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	e.ambient_light_color = Color(0.45, 0.5, 0.6)
-	e.ambient_light_energy = 0.6
-	e.tonemap_mode = Environment.TONE_MAPPER_FILMIC
-	e.fog_enabled = true
-	e.fog_light_color = Color(0.7, 0.8, 0.85)
-	e.fog_density = 0.012
-	env.environment = e
-	add_child(env)
+# Developer/test switches, passed after `--` on the command line (never present on the web):
+#   --autostart          start the game without a click
+#   --god                player takes no damage
+#   --pos=x,z            teleport the player       --yaw=deg  --pitch=deg   aim the camera
+#   --shot=/abs/file.png --t=seconds               save a screenshot after t seconds, then quit
+var _god := false
+func _debug_args() -> void:
+	var a := {}
+	for arg in OS.get_cmdline_user_args():
+		var kv := arg.trim_prefix("--").split("=")
+		a[kv[0]] = kv[1] if kv.size() > 1 else ""
+	_god = a.has("god")
+	if a.has("pos"):
+		var xz: PackedStringArray = a.pos.split(",")
+		player.position = Vector3(float(xz[0]), 0.2, float(xz[1]))
+	if a.has("yaw"):
+		player.rotation.y = deg_to_rad(float(a.yaw))
+	if a.has("pitch"):
+		pivot.rotation.x = deg_to_rad(float(a.pitch))
+	if a.has("autostart"):
+		begin_game()
+	if a.has("shot"):
+		await get_tree().create_timer(float(a.get("t", "3"))).timeout
+		await RenderingServer.frame_post_draw
+		get_viewport().get_texture().get_image().save_png(a.shot)
+		get_tree().quit()
 
-	var sun := DirectionalLight3D.new()
-	sun.rotation_degrees = Vector3(-50, 35, 0)
-	sun.light_energy = 0.9
-	sun.light_color = Color(1, 0.95, 0.8)
-	sun.shadow_enabled = true
-	add_child(sun)
-
-	box(self, Vector3(120, 1, 120), Vector3(0, -0.5, 0), Color(0.22, 0.35, 0.08), true)
-	# grass tufts
-	var greens := [Color(0.55, 0.7, 0.15), Color(0.45, 0.6, 0.1), Color(0.7, 0.8, 0.2)]
-	for i in 500:
-		var p := Vector3(randf_range(-40, 40), 0.25, randf_range(-40, 40))
-		var t := box(self, Vector3(0.15, randf_range(0.3, 0.7), 0.15), p, greens[i % 3])
-		t.rotation.z = randf_range(-0.3, 0.3)
-	# fence ring
-	for side in 4:
-		for i in range(-15, 16):
-			var a := float(i) * 1.2
-			var pos: Vector3
-			match side:
-				0: pos = Vector3(a, 0.6, -18)
-				1: pos = Vector3(a, 0.6, 18)
-				2: pos = Vector3(-18, 0.6, a)
-				_: pos = Vector3(18, 0.6, a)
-			if abs(a) < 2.5:
-				continue  # gaps where zombies stumble in
-			var plank := box(self, Vector3(0.3, randf_range(1.0, 1.4), 0.3), pos, Color(0.6, 0.65, 0.75).darkened(randf() * 0.3))
-			plank.rotation.z = randf_range(-0.15, 0.15)
-	# houses
-	for i in 10:
-		var ang := TAU * i / 10.0
-		var d := randf_range(26, 34)
-		var p := Vector3(cos(ang) * d, 0, sin(ang) * d)
-		var w := randf_range(5, 8)
-		var h := randf_range(4, 7)
-		var hc: Color = [Color(0.8, 0.8, 0.7), Color(0.6, 0.65, 0.6), Color(0.75, 0.7, 0.6)][i % 3]
-		box(self, Vector3(w, h, w), p + Vector3(0, h / 2, 0), hc, true)
-		var roof := box(self, Vector3(w * 0.8, w * 0.8, w + 0.4), p + Vector3(0, h, 0), Color(0.45, 0.25, 0.2))
-		roof.rotation.z = PI / 4
-		roof.scale.y = 0.6
-	# cover crates / cars
-	for i in 8:
-		var p := Vector3(randf_range(-14, 14), 0, randf_range(-14, 14))
-		if p.length() < 4:
-			continue
-		var c := box(self, Vector3(2.2, 1.0, 1.2), p + Vector3(0, 0.5, 0), Color(0.3, 0.3, 0.35), true)
-		c.rotation.y = randf() * PI
-		box(c, Vector3(1.2, 0.6, 1.1), Vector3(0, 0.8, 0), Color(0.5, 0.15, 0.1))
-
-# ---------------- PLAYER ----------------
 func build_player() -> void:
 	player = CharacterBody3D.new()
 	var cs := CollisionShape3D.new()
@@ -174,10 +118,10 @@ func build_player() -> void:
 
 	body_mesh = Node3D.new()
 	player.add_child(body_mesh)
-	box(body_mesh, Vector3(0.5, 0.6, 0.3), Vector3(0, 1.2, 0), Color(0.4, 0.4, 0.4))
-	box(body_mesh, Vector3(0.35, 0.35, 0.35), Vector3(0, 1.7, 0), Color(0.9, 0.7, 0.55))
-	box(body_mesh, Vector3(0.5, 0.8, 0.3), Vector3(0, 0.4, 0), Color(0.15, 0.25, 0.5))
-	box(body_mesh, Vector3(0.45, 0.5, 0.2), Vector3(0, 1.2, 0.22), Color(0.7, 0.5, 0.1))  # backpack
+	B.box(body_mesh, Vector3(0.5, 0.6, 0.3), Vector3(0, 1.2, 0), Color(0.4, 0.4, 0.4))
+	B.box(body_mesh, Vector3(0.35, 0.35, 0.35), Vector3(0, 1.7, 0), Color(0.9, 0.7, 0.55))
+	B.box(body_mesh, Vector3(0.5, 0.8, 0.3), Vector3(0, 0.4, 0), Color(0.15, 0.25, 0.5))
+	B.box(body_mesh, Vector3(0.45, 0.5, 0.2), Vector3(0, 1.2, 0.22), Color(0.7, 0.5, 0.1))  # backpack
 	body_mesh.visible = false
 
 	pivot = Node3D.new()
@@ -185,183 +129,24 @@ func build_player() -> void:
 	player.add_child(pivot)
 	cam = Camera3D.new()
 	cam.fov = 85
+	cam.far = 300
 	pivot.add_child(cam)
 
 	gun = Node3D.new()
 	cam.add_child(gun)
 	gun.position = Vector3(0.25, -0.22, -0.45)
 	gun.scale = Vector3.ONE * 0.6
-	box(gun, Vector3(0.08, 0.1, 0.4), Vector3.ZERO, Color(0.2, 0.2, 0.22))
-	box(gun, Vector3(0.07, 0.16, 0.08), Vector3(0, -0.1, 0.12), Color(0.35, 0.2, 0.1))
-	box(gun, Vector3(0.12, 0.12, 0.12), Vector3(0, -0.05, 0.22), Color(0.9, 0.7, 0.55))  # hand
-	flash = box(gun, Vector3(0.15, 0.15, 0.15), Vector3(0, 0, -0.28), Color(1, 0.9, 0.3))
-	flash.material_override = StandardMaterial3D.new()
-	flash.material_override.albedo_color = Color(1, 0.85, 0.2)
-	flash.material_override.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	flash.visible = false
-
-func label(parent: Node, txt: String, size: int) -> Label:
-	var l := Label.new()
-	l.text = txt
-	l.add_theme_font_size_override("font_size", size)
-	l.add_theme_color_override("font_outline_color", Color.BLACK)
-	l.add_theme_constant_override("outline_size", 4)
-	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	parent.add_child(l)
-	return l
-
-func make_btn(parent: Node, txt: String, sz: Vector2) -> ColorRect:
-	var r := ColorRect.new()
-	r.color = Color(1, 1, 1, 0.18)
-	r.size = sz
-	r.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	parent.add_child(r)
-	var l := label(r, txt, 14)
-	l.size = sz
-	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	return r
-
-func build_hud() -> void:
-	var layer := CanvasLayer.new()
-	add_child(layer)
-	hud = label(layer, "", 14)
-	hud.position = Vector2(8, 6)
-	cross = label(layer, "+", 18)
-	center = label(layer, "", 24)
-	center.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	fs_btn = make_btn(layer, "FULL", Vector2(52, 26))
-	touch_ui = Control.new()
-	touch_ui.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	layer.add_child(touch_ui)
-	stick_base = ColorRect.new()
-	stick_base.color = Color(1, 1, 1, 0.12)
-	stick_base.size = Vector2(110, 110)
-	stick_base.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	touch_ui.add_child(stick_base)
-	stick_knob = ColorRect.new()
-	stick_knob.color = Color(1, 1, 1, 0.35)
-	stick_knob.size = Vector2(44, 44)
-	stick_knob.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	touch_ui.add_child(stick_knob)
-	buttons["fire"] = make_btn(touch_ui, "FIRE", Vector2(84, 84))
-	buttons["fire"].color = Color(1, 0.3, 0.2, 0.3)
-	buttons["jump"] = make_btn(touch_ui, "JUMP", Vector2(60, 46))
-	buttons["dash"] = make_btn(touch_ui, "DASH", Vector2(60, 46))
-	buttons["reload"] = make_btn(touch_ui, "RELOAD", Vector2(64, 30))
-	buttons["view"] = make_btn(touch_ui, "VIEW", Vector2(52, 26))
-	buttons["sens"] = make_btn(touch_ui, "SENS 2", Vector2(64, 26))
-	touch_mode = DisplayServer.is_touchscreen_available()
-	get_viewport().size_changed.connect(layout)
-	layout()
-
-func layout() -> void:
-	var vs := get_viewport().get_visible_rect().size
-	cross.position = vs / 2 - Vector2(5, 12)
-	center.size = Vector2(vs.x, 100)
-	center.position = Vector2(0, vs.y * 0.25)
-	fs_btn.position = Vector2(vs.x - 60, 6)
-	buttons["view"].position = Vector2(vs.x - 120, 6)
-	buttons["sens"].position = Vector2(vs.x - 192, 6)
-	stick_base.position = Vector2(30, vs.y - 140)
-	reset_stick()
-	buttons["fire"].position = Vector2(vs.x - 110, vs.y - 120)
-	buttons["jump"].position = Vector2(vs.x - 180, vs.y - 70)
-	buttons["dash"].position = Vector2(vs.x - 180, vs.y - 130)
-	buttons["reload"].position = Vector2(vs.x - 100, vs.y - 165)
-	touch_ui.visible = touch_mode
-
-func reset_stick() -> void:
-	stick_id = -1
-	stick_vec = Vector2.ZERO
-	stick_knob.position = stick_base.position + stick_base.size / 2 - stick_knob.size / 2
-
-func toggle_fullscreen() -> void:
-	if DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_FULLSCREEN:
-		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
-	else:
-		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
-
-func in_rect(r: Control, p: Vector2) -> bool:
-	return Rect2(r.position, r.size).grow(8).has_point(p)
+	B.box(gun, Vector3(0.08, 0.1, 0.4), Vector3.ZERO, Color(0.2, 0.2, 0.22))
+	B.box(gun, Vector3(0.07, 0.16, 0.08), Vector3(0, -0.1, 0.12), Color(0.35, 0.2, 0.1))
+	B.box(gun, Vector3(0.12, 0.12, 0.12), Vector3(0, -0.05, 0.22), Color(0.9, 0.7, 0.55))  # hand
 
 func begin_game() -> void:
 	if dead:
 		get_tree().reload_current_scene()
 	elif not started:
 		started = true
+		hud.clear_message()
 		next_wave()
-
-func _input(ev: InputEvent) -> void:
-	if ev is InputEventScreenTouch:
-		if not touch_mode:
-			touch_mode = true
-			layout()
-		var p: Vector2 = ev.position
-		if ev.pressed:
-			if in_rect(fs_btn, p):
-				toggle_fullscreen()
-				return
-			if not started or dead:
-				begin_game()
-				return
-			for n in buttons:
-				if in_rect(buttons[n], p):
-					btn_held[n] = ev.index
-					match n:
-						"dash": dash_req = true
-						"reload": start_reload()
-						"view": toggle_view()
-						"sens":
-							sens_level = sens_level % 5 + 1
-							buttons["sens"].get_child(0).text = "SENS %d" % sens_level
-						"fire":
-							if look_id == -1:
-								look_id = ev.index  # aim while holding FIRE
-					return
-			if p.x < get_viewport().get_visible_rect().size.x * 0.45 and stick_id == -1:
-				stick_id = ev.index
-				stick_origin = p
-			elif look_id == -1:
-				look_id = ev.index
-		else:
-			if ev.index == stick_id:
-				reset_stick()
-			if ev.index == look_id:
-				look_id = -1
-			for n in btn_held.keys():
-				if btn_held[n] == ev.index:
-					btn_held.erase(n)
-	elif ev is InputEventScreenDrag:
-		if ev.index == stick_id:
-			var off: Vector2 = (ev.position - stick_origin).limit_length(50)
-			var mag: float = off.length() / 50.0
-			# dead zone, then ramp up smoothly so small thumb wobble is ignored
-			stick_vec = off.normalized() * clamp((mag - 0.15) / 0.85, 0.0, 1.0) if mag > 0.15 else Vector2.ZERO
-			stick_knob.position = stick_base.position + stick_base.size / 2 - stick_knob.size / 2 + off
-		elif ev.index == look_id and not dead:
-			# screen_relative is unaffected by stretch scaling (Godot docs' advice for touch aiming);
-			# dividing by window width makes a swipe turn the same angle on every phone
-			look_delta += ev.screen_relative / float(max(DisplayServer.window_get_size().x, 1))
-
-func _unhandled_input(ev: InputEvent) -> void:
-	if ev is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not dead:
-		player.rotate_y(-ev.relative.x * 0.003)
-		pivot.rotation.x = clamp(pivot.rotation.x - ev.relative.y * 0.003, -1.4, 1.4)
-	if ev is InputEventMouseButton and ev.pressed:
-		if in_rect(fs_btn, ev.position) and Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
-			toggle_fullscreen()
-			return
-		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-		if not started:
-			begin_game()
-	if ev is InputEventKey and ev.pressed and not ev.echo:
-		match ev.keycode:
-			KEY_ESCAPE: Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-			KEY_V: toggle_view()
-			KEY_R: start_reload()
-			KEY_F: toggle_fullscreen()
-			KEY_ENTER: begin_game()
 
 func toggle_view() -> void:
 	third_person = not third_person
@@ -370,34 +155,25 @@ func toggle_view() -> void:
 	cam.position = Vector3(0.6, 0.4, 3.0) if third_person else Vector3.ZERO
 
 func start_reload() -> void:
-	if reloading <= 0 and ammo < 8:
+	if reloading <= 0 and ammo < MAX_AMMO and started and not dead:
 		reloading = 0.9
 
 func _process(dt: float) -> void:
 	# Runs every rendered frame (not the fixed 60 Hz physics tick) so motion stays
 	# smooth on 90/120 Hz phone screens.
-	if not started:
+	controls.game_active = started and not dead
+	var look: Vector2 = controls.take_look()
+	if not started or dead:
 		return
-	if look_delta != Vector2.ZERO and not dead:
-		var k: float = SENS[sens_level]
-		player.rotate_y(-look_delta.x * k)
-		pivot.rotation.x = clamp(pivot.rotation.x - look_delta.y * k * 0.8, -1.4, 1.4)
-	look_delta = Vector2.ZERO
-	if dead:
-		center.text = "YOU GOT BONKED!\nScore %d  -  Wave %d\n%s to try again" % [score, wave, "Tap" if touch_mode else "[Enter]"]
-		return
+	player.rotate_y(-look.x)
+	pivot.rotation.x = clamp(pivot.rotation.x - look.y, -1.4, 1.4)
+
 	# movement
-	var inp := Vector2.ZERO
-	if Input.is_key_pressed(KEY_W): inp.y -= 1
-	if Input.is_key_pressed(KEY_S): inp.y += 1
-	if Input.is_key_pressed(KEY_A): inp.x -= 1
-	if Input.is_key_pressed(KEY_D): inp.x += 1
-	inp += stick_vec
-	inp = inp.limit_length(1.0)
-	var dir := (player.transform.basis * Vector3(inp.x, 0, inp.y))
+	var inp: Vector2 = controls.move
+	var dir := player.transform.basis * Vector3(inp.x, 0, inp.y)
 	var speed := 9.0
 	dash_cd -= dt
-	if (Input.is_key_pressed(KEY_SHIFT) or dash_req) and dash_cd <= 0 and dir != Vector3.ZERO:
+	if dash_req and dash_cd <= 0 and dir != Vector3.ZERO:
 		dash_t = 0.18
 		dash_cd = 0.8
 	dash_req = false
@@ -410,13 +186,16 @@ func _process(dt: float) -> void:
 	player.velocity.x = move_vel.x
 	player.velocity.z = move_vel.y
 	if player.is_on_floor():
-		if Input.is_key_pressed(KEY_SPACE) or btn_held.has("jump"):
+		if controls.jump:
 			player.velocity.y = 8.0
 	else:
 		player.velocity.y -= 22.0 * dt
 	player.move_and_slide()
-	player.position.x = clamp(player.position.x, -17, 17)
-	player.position.z = clamp(player.position.z, -17, 17)
+	var cl: Vector3 = L.clamp_to_streets(player.position, 0.5)
+	player.position.x = cl.x
+	player.position.z = cl.z
+	if player.position.y < -5:
+		player.position.y = 1.0
 
 	# shooting
 	fire_cd -= dt
@@ -424,25 +203,22 @@ func _process(dt: float) -> void:
 		reloading -= dt
 		gun.rotation.x = -0.8
 		if reloading <= 0:
-			ammo = 8
+			ammo = MAX_AMMO
 			gun.rotation.x = 0
-	elif (Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) or btn_held.has("fire")) and fire_cd <= 0:
+	elif controls.fire and fire_cd <= 0:
 		if ammo > 0:
 			shoot()
 		else:
 			start_reload()
 	recoil = lerp(recoil, 0.0, dt * 12)
 	gun.position.z = -0.45 + recoil * 0.15
-	gun.rotation.x = recoil * 0.5 if reloading <= 0 else gun.rotation.x
-	if fire_cd < 0.05:
-		flash.visible = false
-	# bob + shake
+	if reloading <= 0:
+		gun.rotation.x = recoil * 0.5
+	# head bob + shake
 	var t := Time.get_ticks_msec() / 1000.0
 	var bob := sin(t * 14) * 0.04 * dir.length() if player.is_on_floor() else 0.0
-	shake = max(shake - dt * 3, 0)
-	pivot.position = Vector3(randf_range(-1, 1) * shake * 0.1, 1.6 + bob + randf_range(-1, 1) * shake * 0.1, 0)
+	pivot.position = Vector3(0, 1.6 + bob, 0) + fx.shake_offset()
 
-	# combo
 	combo_t -= dt
 	if combo_t <= 0:
 		combo = 0
@@ -459,26 +235,22 @@ func _process(dt: float) -> void:
 
 	update_zombies(dt)
 	hurt_flash = max(hurt_flash - dt, 0)
-	hud.text = "HP %d   AMMO %d/8%s\nSCORE %d   WAVE %d%s%s" % [
-		int(hp), ammo, "  RELOADING" if reloading > 0 else "", score, wave,
-		("   COMBO x%d!" % combo) if combo > 1 else "", "" if touch_mode else "\n[V] view  [Shift] dash  [R] reload  [F] fullscreen"]
-	hud.add_theme_color_override("font_color", Color(1, 0.3, 0.3) if hurt_flash > 0 else Color.WHITE)
+	hud.update_stats({"hp": hp, "ammo": ammo, "max_ammo": MAX_AMMO, "reloading": reloading > 0,
+		"score": score, "wave": wave, "combo": combo, "hurt": clamp(hurt_flash / 0.3, 0.0, 1.0),
+		"dash_ready": clamp(1.0 - dash_cd / 0.8, 0.0, 1.0)})
 
 func shoot() -> void:
 	ammo -= 1
 	fire_cd = 0.16
 	recoil = 1.0
-	shake = 0.4
-	flash.visible = true
-	flash.rotation = Vector3(randf(), randf(), randf())
+	fx.on_shoot()
 	var space := get_world_3d().direct_space_state
 	# shotgun-ish: 5 pellets
 	for i in 5:
 		var spread := Vector3(randf_range(-1, 1), randf_range(-1, 1), 0) * 0.03 if i > 0 else Vector3.ZERO
 		var from := cam.global_position
-		var fwd := -cam.global_transform.basis.z + cam.global_transform.basis * spread
-		var to := from + fwd.normalized() * 60
-		var q := PhysicsRayQueryParameters3D.create(from, to)
+		var fwd := (-cam.global_transform.basis.z + cam.global_transform.basis * spread).normalized()
+		var q := PhysicsRayQueryParameters3D.create(from, from + fwd * 80)
 		q.exclude = [player.get_rid()]
 		q.collide_with_areas = true
 		var hit := space.intersect_ray(q)
@@ -492,23 +264,7 @@ func shoot() -> void:
 			var head: bool = col.get_meta("head")
 			hit_zombie(z, 60.0 if head else 25.0, head, hit.position, fwd)
 		else:
-			gibs(hit.position, Color(0.6, 0.55, 0.4), 2, Vector3.UP)
-
-func gibs(p: Vector3, c: Color, n: int, push: Vector3) -> void:
-	for i in n:
-		var g := RigidBody3D.new()
-		var cs := CollisionShape3D.new()
-		var sh := BoxShape3D.new()
-		sh.size = Vector3.ONE * 0.12
-		cs.shape = sh
-		g.add_child(cs)
-		box(g, sh.size, Vector3.ZERO, c)
-		g.collision_layer = 0
-		g.collision_mask = 1
-		add_child(g)
-		g.global_position = p
-		g.linear_velocity = push * 4 + Vector3(randf_range(-3, 3), randf_range(2, 6), randf_range(-3, 3))
-		get_tree().create_timer(1.5).timeout.connect(g.queue_free)
+			fx.impact(hit.position, hit.normal)
 
 # ---------------- ZOMBIES ----------------
 func next_wave() -> void:
@@ -516,33 +272,35 @@ func next_wave() -> void:
 	to_spawn = 4 + wave * 3
 	spawn_t = 1.5
 	hp = min(hp + 25, 100)
-	center.text = "WAVE %d" % wave
-	get_tree().create_timer(2.0).timeout.connect(func(): if not dead: center.text = "")
+	hud.on_wave(wave)
 
 func spawn_zombie() -> void:
 	var root := Node3D.new()
 	add_child(root)
-	var gaps := [Vector3(0, 0, -20), Vector3(0, 0, 20), Vector3(-20, 0, 0), Vector3(20, 0, 0)]
-	root.position = gaps.pick_random() + Vector3(randf_range(-1.5, 1.5), 0, randf_range(-1.5, 1.5))
+	# prefer spawn points that are not right on top of the player
+	var pts: Array = L.spawn_points().filter(func(p): return p.distance_to(player.position) > 12.0)
+	if pts.is_empty():
+		pts = L.spawn_points()
+	root.position = L.clamp_to_streets(pts.pick_random() + Vector3(randf_range(-1.5, 1.5), 0, randf_range(-1.5, 1.5)), 1.0)
 	var big := randf() < 0.12 and wave > 2
 	var s := 1.6 if big else randf_range(0.85, 1.1)
 	root.scale = Vector3.ONE * s
 	var skin := Color(0.5, 0.7, 0.35).lerp(Color(0.4, 0.55, 0.5), randf())
 	var parts := Node3D.new()
 	root.add_child(parts)
-	box(parts, Vector3(0.25, 0.8, 0.25), Vector3(-0.15, 0.4, 0), Color(0.2, 0.3, 0.55))
-	box(parts, Vector3(0.25, 0.8, 0.25), Vector3(0.15, 0.4, 0), Color(0.2, 0.3, 0.55))
-	box(parts, Vector3(0.6, 0.7, 0.35), Vector3(0, 1.15, 0), SHIRTS.pick_random())
-	var arm_l := box(parts, Vector3(0.18, 0.18, 0.7), Vector3(-0.38, 1.35, -0.35), skin)
-	var arm_r := box(parts, Vector3(0.18, 0.18, 0.7), Vector3(0.38, 1.35, -0.35), skin)
+	B.box(parts, Vector3(0.25, 0.8, 0.25), Vector3(-0.15, 0.4, 0), Color(0.2, 0.3, 0.55))
+	B.box(parts, Vector3(0.25, 0.8, 0.25), Vector3(0.15, 0.4, 0), Color(0.2, 0.3, 0.55))
+	B.box(parts, Vector3(0.6, 0.7, 0.35), Vector3(0, 1.15, 0), SHIRTS.pick_random())
+	var arm_l := B.box(parts, Vector3(0.18, 0.18, 0.7), Vector3(-0.38, 1.35, -0.35), skin)
+	var arm_r := B.box(parts, Vector3(0.18, 0.18, 0.7), Vector3(0.38, 1.35, -0.35), skin)
 	var head := Node3D.new()
 	head.position = Vector3(0, 1.75, 0)
 	parts.add_child(head)
-	box(head, Vector3(0.45, 0.45, 0.45), Vector3.ZERO, skin)
-	box(head, Vector3(0.08, 0.08, 0.02), Vector3(-0.1, 0.05, -0.23), Color(1, 1, 0.3))
-	box(head, Vector3(0.08, 0.08, 0.02), Vector3(0.1, 0.03, -0.23), Color(1, 1, 0.3))
-	box(head, Vector3(0.25, 0.06, 0.02), Vector3(0, -0.12, -0.23), Color(0.2, 0.05, 0.05))
-	box(head, Vector3(0.5, 0.12, 0.5), Vector3(0, 0.25, 0), Color(0.15, 0.1, 0.05))  # hair
+	B.box(head, Vector3(0.45, 0.45, 0.45), Vector3.ZERO, skin)
+	B.box(head, Vector3(0.08, 0.08, 0.02), Vector3(-0.1, 0.05, -0.23), Color(1, 1, 0.3))
+	B.box(head, Vector3(0.08, 0.08, 0.02), Vector3(0.1, 0.03, -0.23), Color(1, 1, 0.3))
+	B.box(head, Vector3(0.25, 0.06, 0.02), Vector3(0, -0.12, -0.23), Color(0.2, 0.05, 0.05))
+	B.box(head, Vector3(0.5, 0.12, 0.5), Vector3(0, 0.25, 0), Color(0.15, 0.1, 0.05))  # hair
 	var label := Label3D.new()
 	label.text = NAMES.pick_random()
 	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
@@ -572,16 +330,19 @@ func spawn_zombie() -> void:
 
 func hit_zombie(z: Dictionary, dmg: float, headshot: bool, p: Vector3, dir: Vector3) -> void:
 	z.hp -= dmg
-	gibs(p, Color(0.3, 0.6, 0.1), 3, dir)
+	fx.zombie_hit(p, dir, headshot)
+	hud.on_hit(headshot)
 	z.root.position += Vector3(dir.x, 0, dir.z).normalized() * 0.25  # knockback
 	if z.hp <= 0:
 		z.dead = true
 		combo += 1
 		combo_t = 2.0
-		score += (150 if headshot else 100) * combo * (3 if z.big else 1)
+		var pts: int = (150 if headshot else 100) * combo * (3 if z.big else 1)
+		score += pts
+		hud.on_kill(pts, headshot)
+		fx.zombie_death(z.head.global_position, z.skin, headshot)
 		if headshot:
 			z.head.visible = false
-			gibs(z.head.global_position, z.skin, 8, Vector3.UP)
 			z.label.text = "BONK!"
 		else:
 			z.label.text = ["oof", "ow", "bleh", "x_x"].pick_random()
@@ -598,10 +359,14 @@ func update_zombies(dt: float) -> void:
 	var t := Time.get_ticks_msec() / 1000.0
 	for z in zombies:
 		var root: Node3D = z.root
-		var to: Vector3 = player.global_position - root.global_position
+		# head for the player, going round the corner blocks via the intersection
+		var goal: Vector3 = L.nav_target(root.position, player.position)
+		var to: Vector3 = goal - root.position
 		to.y = 0
-		var d := to.length()
-		if d > 0.1:
+		var to_player: Vector3 = player.position - root.position
+		to_player.y = 0
+		var d := to_player.length()
+		if to.length() > 0.1:
 			root.look_at(root.global_position - to.normalized(), Vector3.UP)
 		# separation so they don't stack
 		var push := Vector3.ZERO
@@ -611,8 +376,9 @@ func update_zombies(dt: float) -> void:
 				off.y = 0
 				if off.length() < 0.8 and off.length() > 0.001:
 					push += off.normalized() * (0.8 - off.length())
-		if d > 1.1:
+		if d > 1.1 and to.length() > 0.05:
 			root.position += to.normalized() * z.speed * dt + push * 3 * dt
+			root.position = L.clamp_to_streets(root.position, 0.6)
 		# goofy waddle
 		var ph: float = t * z.speed * 3.0 + z.phase
 		z.parts.rotation.z = sin(ph) * 0.15
@@ -624,9 +390,11 @@ func update_zombies(dt: float) -> void:
 		if d < 1.4 and z.atk <= 0:
 			z.atk = 0.8
 			var dmg := 20.0 if z.big else 10.0
-			hp -= dmg
+			if not _god:
+				hp -= dmg
 			hurt_flash = 0.3
-			shake = 0.8
+			fx.player_hurt(dmg)
 			if hp <= 0:
 				dead = true
 				Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+				hud.show_game_over(score, wave)
