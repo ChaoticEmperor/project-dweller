@@ -49,6 +49,10 @@ var buttons := {}      # name -> ColorRect
 var btn_held := {}     # name -> touch index
 var dash_req := false
 var fs_btn: ColorRect
+var look_delta := Vector2.ZERO   # accumulated touch look, applied once per frame
+var sens_level := 2              # 1..5, shown on the SENS button
+var move_vel := Vector2.ZERO     # smoothed horizontal velocity
+const SENS := [0.0, 1.2, 1.8, 2.5, 3.3, 4.2]  # radians per full screen-width swipe
 
 func mat(c: Color) -> StandardMaterial3D:
 	var k := c.to_html()
@@ -246,6 +250,7 @@ func build_hud() -> void:
 	buttons["dash"] = make_btn(touch_ui, "DASH", Vector2(60, 46))
 	buttons["reload"] = make_btn(touch_ui, "RELOAD", Vector2(64, 30))
 	buttons["view"] = make_btn(touch_ui, "VIEW", Vector2(52, 26))
+	buttons["sens"] = make_btn(touch_ui, "SENS 2", Vector2(64, 26))
 	touch_mode = DisplayServer.is_touchscreen_available()
 	get_viewport().size_changed.connect(layout)
 	layout()
@@ -257,6 +262,7 @@ func layout() -> void:
 	center.position = Vector2(0, vs.y * 0.25)
 	fs_btn.position = Vector2(vs.x - 60, 6)
 	buttons["view"].position = Vector2(vs.x - 120, 6)
+	buttons["sens"].position = Vector2(vs.x - 192, 6)
 	stick_base.position = Vector2(30, vs.y - 140)
 	reset_stick()
 	buttons["fire"].position = Vector2(vs.x - 110, vs.y - 120)
@@ -306,6 +312,12 @@ func _input(ev: InputEvent) -> void:
 						"dash": dash_req = true
 						"reload": start_reload()
 						"view": toggle_view()
+						"sens":
+							sens_level = sens_level % 5 + 1
+							buttons["sens"].get_child(0).text = "SENS %d" % sens_level
+						"fire":
+							if look_id == -1:
+								look_id = ev.index  # aim while holding FIRE
 					return
 			if p.x < get_viewport().get_visible_rect().size.x * 0.45 and stick_id == -1:
 				stick_id = ev.index
@@ -323,11 +335,14 @@ func _input(ev: InputEvent) -> void:
 	elif ev is InputEventScreenDrag:
 		if ev.index == stick_id:
 			var off: Vector2 = (ev.position - stick_origin).limit_length(50)
-			stick_vec = off / 50.0
+			var mag: float = off.length() / 50.0
+			# dead zone, then ramp up smoothly so small thumb wobble is ignored
+			stick_vec = off.normalized() * clamp((mag - 0.15) / 0.85, 0.0, 1.0) if mag > 0.15 else Vector2.ZERO
 			stick_knob.position = stick_base.position + stick_base.size / 2 - stick_knob.size / 2 + off
 		elif ev.index == look_id and not dead:
-			player.rotate_y(-ev.relative.x * 0.008)
-			pivot.rotation.x = clamp(pivot.rotation.x - ev.relative.y * 0.008, -1.4, 1.4)
+			# screen_relative is unaffected by stretch scaling (Godot docs' advice for touch aiming);
+			# dividing by window width makes a swipe turn the same angle on every phone
+			look_delta += ev.screen_relative / float(max(DisplayServer.window_get_size().x, 1))
 
 func _unhandled_input(ev: InputEvent) -> void:
 	if ev is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not dead:
@@ -358,9 +373,16 @@ func start_reload() -> void:
 	if reloading <= 0 and ammo < 8:
 		reloading = 0.9
 
-func _physics_process(dt: float) -> void:
+func _process(dt: float) -> void:
+	# Runs every rendered frame (not the fixed 60 Hz physics tick) so motion stays
+	# smooth on 90/120 Hz phone screens.
 	if not started:
 		return
+	if look_delta != Vector2.ZERO and not dead:
+		var k: float = SENS[sens_level]
+		player.rotate_y(-look_delta.x * k)
+		pivot.rotation.x = clamp(pivot.rotation.x - look_delta.y * k * 0.8, -1.4, 1.4)
+	look_delta = Vector2.ZERO
 	if dead:
 		center.text = "YOU GOT BONKED!\nScore %d  -  Wave %d\n%s to try again" % [score, wave, "Tap" if touch_mode else "[Enter]"]
 		return
@@ -382,8 +404,11 @@ func _physics_process(dt: float) -> void:
 	if dash_t > 0:
 		dash_t -= dt
 		speed = 28.0
-	player.velocity.x = dir.x * speed
-	player.velocity.z = dir.z * speed
+	# ease toward the target speed instead of snapping (dashes stay instant)
+	var target := Vector2(dir.x, dir.z) * speed
+	move_vel = target if dash_t > 0 else move_vel.lerp(target, 1.0 - exp(-14.0 * dt))
+	player.velocity.x = move_vel.x
+	player.velocity.z = move_vel.y
 	if player.is_on_floor():
 		if Input.is_key_pressed(KEY_SPACE) or btn_held.has("jump"):
 			player.velocity.y = 8.0

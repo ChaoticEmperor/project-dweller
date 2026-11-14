@@ -3,7 +3,9 @@ Fast, goofy, pixelated 3D zombie FPS made with Godot 4.3 (all built in `main.gd`
 
 Open the folder in Godot 4.3+ and press Play.
 
-**Controls:** WASD move · Mouse aim · LMB shoot (5-pellet boomstick) · R reload · Shift dash · Space jump · V toggle first/third person · Esc free mouse · Enter restart
+**Controls (keyboard):** WASD move · Mouse aim · LMB shoot (5-pellet boomstick) · R reload · Shift dash · Space jump · V toggle first/third person · F fullscreen · Esc free mouse · Enter restart
+
+**Controls (touch):** left side = joystick · swipe right side to look (dragging on FIRE also aims) · FIRE / JUMP / DASH / RELOAD buttons · VIEW · SENS cycles look sensitivity 1-5 · FULL fullscreen
 
 Headshots pop heads off for bonus points; quick kills build a combo multiplier. Waves get bigger and faster; big zombies hit harder and are worth 3x.
 
