@@ -49,6 +49,7 @@ var dead := false
 var hurt_flash := 0.0
 var started := false
 var move_vel := Vector2.ZERO
+var obstacles: Array = []  # [{pos, radius}] big props zombies walk around
 
 func _ready() -> void:
 	randomize()
@@ -64,6 +65,8 @@ func _ready() -> void:
 	fx.setup(cam)
 	fx.attach_gun(gun)
 	fx.add_street_lights(clutter.lamp_positions())
+	fx.add_subway_globes([Vector3(6.25, 3.3, 17.15), Vector3(8.75, 3.3, 17.15), Vector3(-6.25, 3.3, -17.15), Vector3(-8.75, 3.3, -17.15)])
+	obstacles = clutter.obstacles()
 	hud = preload("res://hud.gd").new()
 	add_child(hud)
 	hud.build()
@@ -157,6 +160,7 @@ func toggle_view() -> void:
 func start_reload() -> void:
 	if reloading <= 0 and ammo < MAX_AMMO and started and not dead:
 		reloading = 0.9
+		fx.on_reload()
 
 func _process(dt: float) -> void:
 	# Runs every rendered frame (not the fixed 60 Hz physics tick) so motion stays
@@ -176,6 +180,7 @@ func _process(dt: float) -> void:
 	if dash_req and dash_cd <= 0 and dir != Vector3.ZERO:
 		dash_t = 0.18
 		dash_cd = 0.8
+		fx.on_dash()
 	dash_req = false
 	if dash_t > 0:
 		dash_t -= dt
@@ -190,7 +195,11 @@ func _process(dt: float) -> void:
 			player.velocity.y = 8.0
 	else:
 		player.velocity.y -= 22.0 * dt
+	var was_air := not player.is_on_floor()
+	var vy := player.velocity.y
 	player.move_and_slide()
+	if was_air and player.is_on_floor():
+		fx.on_land(-vy)
 	var cl: Vector3 = L.clamp_to_streets(player.position, 0.5)
 	player.position.x = cl.x
 	player.position.z = cl.z
@@ -273,6 +282,7 @@ func next_wave() -> void:
 	spawn_t = 1.5
 	hp = min(hp + 25, 100)
 	hud.on_wave(wave)
+	fx.on_wave(wave)
 
 func spawn_zombie() -> void:
 	var root := Node3D.new()
@@ -282,6 +292,7 @@ func spawn_zombie() -> void:
 	if pts.is_empty():
 		pts = L.spawn_points()
 	root.position = L.clamp_to_streets(pts.pick_random() + Vector3(randf_range(-1.5, 1.5), 0, randf_range(-1.5, 1.5)), 1.0)
+	fx.zombie_spawn(root.position)
 	var big := randf() < 0.12 and wave > 2
 	var s := 1.6 if big else randf_range(0.85, 1.1)
 	root.scale = Vector3.ONE * s
@@ -378,6 +389,19 @@ func update_zombies(dt: float) -> void:
 					push += off.normalized() * (0.8 - off.length())
 		if d > 1.1 and to.length() > 0.05:
 			root.position += to.normalized() * z.speed * dt + push * 3 * dt
+			# slide around big props (cars, bus, barriers)
+			for ob in obstacles:
+				var od: Vector3 = root.position - ob.pos
+				od.y = 0
+				var rr: float = ob.radius + 0.35
+				var ol := od.length()
+				if ol < rr and ol > 0.001:
+					var n := od / ol
+					# push out, plus a sideways nudge so they don't jam nose-first into the prop
+					var side := Vector3(-n.z, 0, n.x)
+					if side.dot(to) < 0:
+						side = -side
+					root.position += n * (rr - ol) + side * z.speed * dt * 0.6
 			root.position = L.clamp_to_streets(root.position, 0.6)
 		# goofy waddle
 		var ph: float = t * z.speed * 3.0 + z.phase
