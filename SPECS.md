@@ -63,6 +63,7 @@ may be relied on by other files, so **signatures and meanings below must not cha
 - `Models.make_gun() -> Node3D` first-person gun, barrel along -Z, with a child `Node3D` named `Muzzle` at the barrel tip.
   main positions/scales the gun and animates recoil by moving the whole node.
 - `Models.make_player_body() -> Node3D` third-person body, feet at y 0, facing -Z.
+- `Models.gun_pump(gun, k)` slides the pump (k 0..1); `Models.prewarm()` fills the mesh cache at start-up.
 - Rig API (zombies.gd drives it; the rig never moves its own root transform except in `die`/`spawn_rise`):
   - vars `type: String`, `height: float` (m), `radius: float` (m), `skin: Color`
   - `build(type, rng)` (called by Models), `hit_shapes() -> [{size: Vector3, pos: Vector3, head: bool}]` (rig-local boxes)
@@ -77,7 +78,8 @@ may be relied on by other files, so **signatures and meanings below must not cha
 
 ## sfx.gd (extends Node)
 - `setup()`, `play(name: String, pitch := 1.0, volume_db := 0.0)`, `play_at(name, pos: Vector3, pitch := 1.0)`,
-  `set_listener(node: Node3D)`, `set_music(on: bool)`, `set_intensity(k: float)` (0 calm … 1 full horde).
+  `set_listener(node: Node3D)`, `set_music(on: bool)`, `set_intensity(k: float)` (0 calm … 1 full horde),
+  `set_volume(k)`, `get_volume()`, `toggle_mute() -> bool`, `is_muted()`.
 - Unknown names are ignored silently. Frozen names: `shoot pump reload empty dash jump land hurt death_player
   hit headshot kill shove wave_start wave_clear upgrade_pick ui_click zombie_spawn zombie_groan zombie_windup
   zombie_attack bloater_swell explode boss_step`.
@@ -97,12 +99,13 @@ may be relied on by other files, so **signatures and meanings below must not cha
 - `modal_open() -> bool`; `show_upgrades(cards, on_pick: Callable)` shows the draft, handles its own taps/clicks/keys 1-3
   and calls `on_pick.call(id)` exactly once; `set_quality_label(text)`.
 - `BUTTON_NAMES` gains `"shove"` (touch action button) and `"res"` (small top-right button, shown on desktop too).
-- Must look right at viewport heights 360 and 540 (scale everything by `viewport_height / 360`).
+- Must look right at viewport heights 360 and 540 (everything is scaled by `min(width / 640, height / 360)`).
+- Upgrade card dictionaries also carry `icon`, `level` and `max` for the draft screen.
 
 ## controls.gd (extends Node)
 - Vars `game_active` (set by main), `touch_mode`, `move`, `fire`, `jump`, `sens_level`; `setup(hud)`, `take_look()`,
   `toggle_fullscreen()`, `set_sens_level()`.
-- Signals: `dash`, `reload`, `toggle_view`, `start_pressed`, `shove`, `toggle_quality`.
+- Signals: `dash`, `reload`, `toggle_view`, `start_pressed`, `shove`, `toggle_quality`, `toggle_mute`.
 - While `hud.modal_open()` is true, controls emits nothing and leaves all input to the HUD.
 - Never use `InputEventScreenDrag.relative`/`screen_relative` (Godot web bug #94346) — track positions per touch index.
 
@@ -110,7 +113,8 @@ may be relied on by other files, so **signatures and meanings below must not cha
 - Existing: `setup(cam)`, `attach_gun(gun)`, `add_street_lights`, `add_subway_globes`, `on_shoot`, `impact(pos, normal)`,
   `zombie_hit(pos, dir, headshot)`, `zombie_death(head_pos, skin, headshot)`, `player_hurt(dmg)`, `shake_offset()`,
   `gibs`, `on_dash`, `on_land(speed)`, `zombie_spawn(pos)`, `on_wave(n)`, `on_reload`.
-- New: `on_shove(hit_count: int)`, `explosion(pos, radius)`, `on_upgrade()`, var `shake_scale := 1.0`.
+- New: `on_shove(hit_count: int)`, `explosion(pos, radius)`, `explosion_colored(pos, radius, toxic)`, `on_upgrade()`,
+  `hit_stop(seconds)`, vars `shake_scale := 1.0`, `hit_stop_enabled`.
 - fx writes `cam.rotation` and `cam.fov`; nothing else may.
 
 ## Testing (Godot binary path is given in each task brief as `G`)

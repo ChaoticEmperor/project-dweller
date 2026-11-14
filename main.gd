@@ -167,9 +167,15 @@ func _nav_check(dt: float) -> void:
 	for z in zombies.list:
 		var p: Vector3 = z.rig.position
 		var far: bool = p.distance_to(player.position) > 2.5
+		# only a zombie that has barely moved for two checks in a row (6 s) counts;
+		# one that is circling the player can pass near its old spot once by chance
 		if z.has("nav_last") and far and p.distance_to(z.nav_last) < 0.6:
-			stuck += 1
-			print("STUCK at ", p.snapped(Vector3(0.1, 0.1, 0.1)))
+			z.nav_n = z.get("nav_n", 0) + 1
+			if z.nav_n >= 2:
+				stuck += 1
+				print("STUCK at ", p.snapped(Vector3(0.1, 0.1, 0.1)), " type=", z.type)
+		else:
+			z.nav_n = 0
 		z.nav_last = p
 	print("NAV zombies=", zombies.list.size(), " stuck=", stuck, " wave=", wave)
 

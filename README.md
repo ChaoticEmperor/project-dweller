@@ -3,11 +3,13 @@ Fast, goofy, pixelated 3D zombie FPS made with Godot 4.3 set in a New York stree
 
 Open the folder in Godot 4.3+ and press Play.
 
-**Controls (keyboard):** WASD move · Mouse aim · LMB shoot (5-pellet boomstick) · R reload · Shift dash · Space jump · V toggle first/third person · F fullscreen · Esc free mouse · Enter restart
+**Controls (keyboard):** WASD/arrows move · Mouse aim · LMB shoot · RMB or E shove · R reload · Shift dash · Space jump · V first/third person · F fullscreen · G resolution (360p/540p) · M mute · [ ] sensitivity · Esc free mouse · Enter restart
 
-**Controls (touch):** left side = joystick · swipe right side to look (dragging on FIRE also aims) · FIRE / JUMP / DASH / RELOAD buttons · VIEW · SENS cycles look sensitivity 1-5 · FULL fullscreen
+**Controls (touch):** left side = joystick · swipe right side to look (dragging on FIRE also aims) · FIRE / JUMP / DASH / SHOVE / RELOAD buttons · VIEW · SENS · 360P/540P · FULL
 
-Headshots pop heads off for bonus points; quick kills build a combo multiplier. Waves get bigger and faster; big zombies hit harder and are worth 3x.
+Headshots pop heads for bonus points and quick kills build a combo. Waves arrive in packs; after each wave you pick one of three upgrades. Zombie types: commuters, fast delivery guys (wave 3+), exploding bloaters (wave 6+) and a sanitation boss every fifth wave. All sound is synthesised in code.
+
+`SPECS.md` describes how the scripts talk to each other and who owns which file.
 
 ## Web deploy (Firebase Hosting)
 1. Put your Firebase project ID in `.firebaserc`.
