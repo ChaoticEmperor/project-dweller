@@ -49,6 +49,7 @@ var dead := false
 var hurt_flash := 0.0
 var started := false
 var move_vel := Vector2.ZERO
+var air_t := 0.0
 var obstacles: Array = []  # [{pos, radius}] big props zombies walk around
 
 func _ready() -> void:
@@ -177,7 +178,9 @@ func _process(dt: float) -> void:
 	var dir := player.transform.basis * Vector3(inp.x, 0, inp.y)
 	var speed := 9.0
 	dash_cd -= dt
-	if dash_req and dash_cd <= 0 and dir != Vector3.ZERO:
+	if dash_req and dash_cd <= 0:
+		if dir == Vector3.ZERO:
+			dir = -player.transform.basis.z  # standing still: dash forward
 		dash_t = 0.18
 		dash_cd = 0.8
 		fx.on_dash()
@@ -190,10 +193,12 @@ func _process(dt: float) -> void:
 	move_vel = target if dash_t > 0 else move_vel.lerp(target, 1.0 - exp(-14.0 * dt))
 	player.velocity.x = move_vel.x
 	player.velocity.z = move_vel.y
-	if player.is_on_floor():
-		if controls.jump:
-			player.velocity.y = 8.0
-	else:
+	# coyote time: a jump still works for a moment after stepping off something
+	air_t = 0.0 if player.is_on_floor() else air_t + dt
+	if controls.jump and air_t < 0.1:
+		player.velocity.y = 8.0
+		air_t = 1.0
+	if not player.is_on_floor():
 		player.velocity.y -= 22.0 * dt
 	var was_air := not player.is_on_floor()
 	var vy := player.velocity.y

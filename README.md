@@ -1,5 +1,5 @@
 # Zombie Bonk
-Fast, goofy, pixelated 3D zombie FPS made with Godot 4.3 (all built in `main.gd`).
+Fast, goofy, pixelated 3D zombie FPS made with Godot 4.3 set in a New York street intersection at dusk. Everything is built in code: `main.gd` (rules), `world.gd` (city), `clutter.gd` (props), `fx.gd` (lighting/effects), `hud.gd` (UI), `controls.gd` (input), `layout.gd` + `build.gd` (shared).
 
 Open the folder in Godot 4.3+ and press Play.
 
