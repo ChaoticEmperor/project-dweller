@@ -263,6 +263,7 @@ func _on_upgrade_picked(id: String) -> void:
 	sfx.play("upgrade_pick")
 	fx.on_upgrade()
 	ammo = int(stat("max_ammo"))
+	hp = min(hp, stat("max_hp"))  # an upgrade can lower max health
 	if not controls.touch_mode:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	next_wave()
