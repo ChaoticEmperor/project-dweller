@@ -65,6 +65,7 @@ var rest_t := -1.0         # >0 while resting between waves
 var move_vel := Vector2.ZERO
 var air_t := 0.0
 var hi_res := false
+var pump_t := 0.0           # >0 while the shotgun's pump is sliding
 var rng := RandomNumberGenerator.new()
 
 func stat(name: String) -> float:
@@ -116,6 +117,8 @@ func _ready() -> void:
 	controls.start_pressed.connect(begin_game)
 	controls.shove.connect(do_shove)
 	controls.toggle_quality.connect(toggle_quality)
+	controls.toggle_mute.connect(func(): if sfx.has_method("toggle_mute"): sfx.toggle_mute())
+	Models.prewarm()  # build the zombie meshes now so the first spawns do not hitch
 	hud.show_title()
 	_debug_args()
 
@@ -367,6 +370,9 @@ func _process(dt: float) -> void:
 			sfx.play("empty")
 			start_reload()
 	recoil = lerp(recoil, 0.0, dt * 12)
+	if pump_t > 0:
+		pump_t = max(pump_t - dt, 0.0)
+		Models.gun_pump(gun, sin(PI * (1.0 - pump_t / 0.25)))
 	gun.position.z = -0.45 + recoil * 0.15
 	if reloading <= 0:
 		gun.rotation.x = recoil * 0.5
@@ -387,7 +393,7 @@ func _process(dt: float) -> void:
 
 	nav.update(player.position)
 	zombies.update(dt)
-	sfx.set_intensity(clamp(zombies.list.size() / 20.0, 0.0, 1.0))
+	sfx.set_intensity(clamp(max(zombies.list.size() / 24.0, zombies.intensity), 0.0, 1.0))
 	if _navtest:
 		_nav_check(dt)
 	hurt_flash = max(hurt_flash - dt, 0)
@@ -403,6 +409,7 @@ func shoot() -> void:
 	ammo -= 1
 	fire_cd = stat("fire_cd")
 	recoil = 1.0
+	pump_t = 0.25
 	fx.on_shoot()
 	sfx.play("shoot", randf_range(0.95, 1.05))
 	var space := get_world_3d().direct_space_state
