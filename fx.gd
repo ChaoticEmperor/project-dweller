@@ -4,8 +4,11 @@ extends Node3D
 # Built for the Compatibility renderer (WebGL2) and phones:
 #   - no shadows, a handful of real lights (3 pooled street-lamp lights, 2 subway globes,
 #     1 muzzle flash, 1 "pop" flash) - everything else is faked with additive sprites
-#   - every particle lives in one of five fixed-size MultiMesh pools that are integrated by
-#     hand, so effects never allocate nodes during play and cost ~12 draw calls in total
+#   - every particle lives in one of six fixed-size MultiMesh pools that are integrated by
+#     hand, so effects never allocate nodes during play and cost ~13 draw calls in total
+#   - camera feel: weapon recoil and the shove are critically damped springs (directional, no
+#     jitter); only explosions / getting hurt / headshot pops add a short decaying shake.
+#     Everything the camera does is multiplied by `shake_scale` (0 = a perfectly still camera).
 #   - all pools are drawn from the first frame (dead instances are zero-sized), so their
 #     shaders are compiled on the title screen, not on the first shot
 const L = preload("res://layout.gd")
@@ -200,7 +203,8 @@ var lit: Pool      # shaded cubes: gibs, shells, masonry chips
 var goo: Pool      # unshaded cubes: goo blobs + splats, dust/smoke puffs
 var add: Pool      # additive cubes: sparks, tracers
 var glow: Pool     # additive soft billboards: flashes
-var ring: Pool     # additive ring billboards: headshot pop
+var ring: Pool     # additive ring billboards: headshot pop, blast shock rings
+var gring: Pool    # additive rings lying flat on the ground: blast / shove / upgrade shockwaves
 
 var flash: MeshInstance3D
 var flash_t := 0.0
@@ -210,8 +214,33 @@ var pop_light: OmniLight3D
 var pop_t := 0.0
 var warm := 6      # frames during which hidden effects are kept drawn to compile their shaders
 
+# Camera feel. Public knobs:
+var shake_scale := 1.0        # multiplies every camera effect (kick, shake, lunge, fov punch); 0 = off
+var hit_stop_enabled := true  # allow the tiny freeze on headshot kills
+
+const REC_W := 22.0           # recoil spring stiffness (rad/s); critically damped, back to rest in ~0.25 s
+const REC_PITCH := 0.03       # radians of muzzle climb at the peak of a single shot
+const REC_BACK := 0.04        # metres the camera is pushed back at that peak
+const REC_MAX := 1.8          # rapid fire stacks up to about this many "single shots" and no further
+const SHV_W := 13.0           # shove lunge spring
+const FIRE_COL := Color(1.0, 0.55, 0.15)
+const TOXIC_COL := Color(0.55, 1.0, 0.2)
+const BIG_BLAST := 3.2        # explosions with a larger radius are the toxic (bloater) kind
+
 var trauma := 0.0
-var kick := 0.0    # shot recoil, 1 -> 0
+var rec := 0.0     # recoil spring position (1 = peak of one shot) and velocity
+var rec_v := 0.0
+var shv := 0.0     # shove lunge spring
+var shv_v := 0.0
+var shove_t := -1.0           # gun shove animation clock, <0 = idle
+var gun_base := Vector3.ZERO  # gun rest position (main owns position.z / rotation.x, fx only touches x/y and yaw/roll)
+var boom_t := -10.0           # clock time of the last explosion (rapid blasts are thinned out)
+var pop_e := 3.0
+var pop_dur := 0.16
+var fov_add := 0.0
+var _hs_on := false           # hit-stop in progress (Engine.time_scale lowered)
+var _hs_until := 0            # real time (usec) at which it ends
+var _hs_ended := 0
 var roll := 0.0    # hurt roll impulse
 var dip := 0.0     # landing dip
 var punch := 0.0   # dash fov punch
@@ -359,8 +388,12 @@ func _build_pools() -> void:
 	lit = Pool.new(self, cube, lit_mat, 128, false)
 	goo = Pool.new(self, cube, _unshaded(false), 128, false)
 	add = Pool.new(self, cube, _unshaded(true), 96, true)
-	glow = Pool.new(self, quad, _unshaded(true, glow_tex, true), 24, true)
-	ring = Pool.new(self, quad, _unshaded(true, _radial_tex(32, true), true), 6, true)
+	glow = Pool.new(self, quad, _unshaded(true, glow_tex, true), 32, true)
+	var ring_tex := _radial_tex(32, true)
+	ring = Pool.new(self, quad, _unshaded(true, ring_tex, true), 12, true)
+	var flat := QuadMesh.new()
+	flat.orientation = PlaneMesh.FACE_Y
+	gring = Pool.new(self, flat, _unshaded(true, ring_tex), 10, true)
 
 	muzzle_light = _omni(Color(1.0, 0.75, 0.4), 9.0)
 	pop_light = _omni(Color(0.8, 1.0, 0.5), 8.0)
@@ -450,6 +483,7 @@ func _build_ambient() -> void:
 # Called once with the first-person gun node (child of the camera, barrel points along -Z).
 func attach_gun(g: Node3D) -> void:
 	gun = g
+	gun_base = g.position
 	# one merged cartoon star: a forward spike plus crossed blades
 	var st := SurfaceTool.new()
 	var bm := BoxMesh.new()
@@ -623,6 +657,9 @@ func _process(dt: float) -> void:
 	add.update(dt)
 	glow.update(dt)
 	ring.update(dt)
+	gring.update(dt)
+	if _hs_on and Time.get_ticks_usec() >= _hs_until:
+		_end_hit_stop()
 
 	if warm > 0:
 		warm -= 1
@@ -641,20 +678,54 @@ func _process(dt: float) -> void:
 		pop_t -= dt
 		pop_light.visible = pop_t > 0.0
 		if pop_t > 0.0:
-			pop_light.light_energy = 3.0 * pop_t / 0.16
+			pop_light.light_energy = pop_e * pop_t / pop_dur
 	_update_lamps(dt)
 	motes.global_position = cam.global_position + Vector3(0, 1.5, 0)
 
-	# camera feel: everything decays fast so it never smears on a phone
+	# camera feel: springs for the directional stuff, a short decaying shake for the rest
 	trauma = maxf(trauma - dt * 2.2, 0.0)
-	kick = kick * exp(-16.0 * dt)
+	var r2 := _spring(rec, rec_v, REC_W, dt)
+	rec = r2.x
+	rec_v = r2.y
+	var s2 := _spring(shv, shv_v, SHV_W, dt)
+	shv = s2.x
+	shv_v = s2.y
 	roll = roll * exp(-9.0 * dt)
 	dip = dip * exp(-11.0 * dt)
+	punch = maxf(punch - dt * 4.5, 0.0)
+	var k := shake_scale
 	var s := trauma * trauma
-	cam.rotation = Vector3(kick * 0.028 + _noise(31.0) * s * 0.02, _noise(57.0) * s * 0.02, roll + _noise(83.0) * s * 0.025)
-	if punch > 0.0:
-		punch = maxf(punch - dt * 4.5, 0.0)
-		cam.fov = base_fov + 9.0 * punch * punch
+	cam.rotation = Vector3(rec * REC_PITCH - shv * 0.03 + _noise(31.0) * s * 0.02, _noise(57.0) * s * 0.02,
+		roll + _noise(83.0) * s * 0.025) * k
+	var fa := 9.0 * punch * punch * k
+	if fa != fov_add:
+		fov_add = fa
+		cam.fov = base_fov + fa
+	_update_gun_shove(dt)
+
+# Critically damped spring towards 0, solved exactly so it is stable at any frame rate.
+func _spring(x: float, v: float, w: float, dt: float) -> Vector2:
+	var e := exp(-w * dt)
+	var c := v + w * x
+	return Vector2((x + c * dt) * e, (v - c * w * dt) * e)
+
+# Two-handed push: the gun swings across the view like a bar, then settles back.
+# Only position.x/y and rotation.y/z are touched, so main's recoil (position.z, rotation.x) is left alone.
+func _update_gun_shove(dt: float) -> void:
+	if shove_t < 0.0 or gun == null:
+		return
+	shove_t += dt
+	var a := 0.0
+	if shove_t < 0.06:
+		a = 1.0 - pow(1.0 - shove_t / 0.06, 2.0)
+	elif shove_t < 0.34:
+		a = 1.0 - smoothstep(0.12, 0.34, shove_t)
+	else:
+		shove_t = -1.0
+	gun.position.x = gun_base.x - 0.17 * a
+	gun.position.y = gun_base.y + 0.07 * a
+	gun.rotation.y = 1.15 * a
+	gun.rotation.z = 0.25 * a
 
 func _noise(seed_k: float) -> float:
 	return sin(clock * 47.0 + seed_k) * 0.6 + sin(clock * 71.0 + seed_k * 2.3) * 0.4
@@ -662,7 +733,37 @@ func _noise(seed_k: float) -> float:
 # Camera offset to add this frame (main adds it to the camera pivot position).
 func shake_offset() -> Vector3:
 	var s := trauma * trauma
-	return Vector3(_noise(11.0) * s * 0.05, _noise(19.0) * s * 0.05 - dip * 0.12, kick * 0.035)
+	return Vector3(_noise(11.0) * s * 0.05, _noise(19.0) * s * 0.05 - dip * 0.12 - shv * 0.03,
+		rec * REC_BACK - shv * 0.11) * shake_scale
+
+# Freeze the action for a few hundredths of a second (the "crunch" on a headshot kill).
+# Safe by construction: the end time is in real time and checked every frame, overlapping calls
+# only extend it (never past 0.1 s), stops are rate limited, and leaving the tree (restart)
+# or losing focus always restores normal speed.
+func hit_stop(seconds: float) -> void:
+	if not hit_stop_enabled or seconds <= 0.0 or not is_inside_tree():
+		return
+	var now := Time.get_ticks_usec()
+	if not _hs_on and now - _hs_ended < 250000:
+		return
+	_hs_until = maxi(_hs_until, now + int(minf(seconds, 0.1) * 1000000.0))
+	if not _hs_on:
+		_hs_on = true
+		Engine.time_scale = 0.05
+
+func _end_hit_stop() -> void:
+	if _hs_on:
+		_hs_on = false
+		_hs_ended = Time.get_ticks_usec()
+		Engine.time_scale = 1.0
+
+func _exit_tree() -> void:
+	_end_hit_stop()
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_APPLICATION_FOCUS_OUT or what == NOTIFICATION_WM_WINDOW_FOCUS_OUT \
+			or what == NOTIFICATION_APPLICATION_PAUSED or what == NOTIFICATION_PREDELETE:
+		_end_hit_stop()
 
 # ---------------------------------------------------------------- helpers
 func _rv(k: float) -> Vector3:
@@ -703,8 +804,8 @@ func _goo_burst(p: Vector3, dir: Vector3, n: int, speed: float) -> void:
 # ---------------------------------------------------------------- events
 # The player fired.
 func on_shoot() -> void:
-	trauma = minf(trauma + 0.3, 0.7)
-	kick = 1.0
+	# directional kick: an impulse into the recoil spring; the closer to the cap, the less it adds
+	rec_v += REC_W * 2.718 * clampf(1.0 - rec / REC_MAX, 0.2, 1.0)
 	shot_pending = true
 	shot_tracers = 0
 	if gun == null:
@@ -782,9 +883,8 @@ func zombie_death(head_pos: Vector3, skin: Color, headshot: bool) -> void:
 	_sparks(head_pos, Vector3.UP, 8, Color(0.8, 1.0, 0.35), 7.0)
 	ring.emit(head_pos, Vector3.ZERO, _cube(0.5), Color(0.9, 1.0, 0.45), 0.28, 0.0, 0.0, 6.5, 1.0)
 	glow.emit(head_pos, Vector3.ZERO, _cube(2.4), Color(0.85, 1.0, 0.45), 0.13, 0.0, 0.0, 0.8, 1.0)
-	pop_light.global_position = head_pos + Vector3(0, 0.2, 0)
-	pop_t = 0.16
-	warm = 0
+	_pop(head_pos + Vector3(0, 0.2, 0), Color(0.8, 1.0, 0.5), 3.0, 0.16, 8.0)
+	hit_stop(0.04)
 
 # The player took `dmg` damage.
 func player_hurt(dmg: float) -> void:
@@ -829,16 +929,119 @@ func on_reload() -> void:
 		lit.emit(gun.to_global(Vector3(0.05, -0.05, 0.1)), cb.x * randf_range(0.5, 1.2) + Vector3(0, 1.0, 0) + _rv(0.4),
 			cb * Basis.from_scale(Vector3(0.03, 0.03, 0.07)), Color(0.85, 0.2, 0.12), 1.6, 18.0, 0.0, 0.0, 0.3, randf_range(10, 18), 1)
 
-# ---- added for shove / explosions / upgrades (see SPECS.md) ----
+# ---- shove / explosions / upgrades (see SPECS.md) ----
+
+func _pop(p: Vector3, c: Color, energy: float, dur: float, rng: float) -> void:
+	pop_light.global_position = p
+	pop_light.light_color = c
+	pop_light.omni_range = rng
+	pop_e = energy
+	pop_dur = dur
+	pop_t = dur
+	warm = 0
+
+# Flat (yaw-only) forward direction of the camera.
+func _flat_fwd() -> Vector3:
+	var cb := cam.global_transform.basis
+	var f := Vector3(-cb.z.x, 0.0, -cb.z.z)
+	if f.length() < 0.05:
+		f = Vector3(cb.y.x, 0.0, cb.y.z)   # looking straight up/down
+	return f.normalized()
+
+func _ground_ring(p: Vector3, c: Color, d0: float, d1: float, lifetime: float) -> void:
+	p.y = Pool.floor_y(p) + 0.06
+	gring.emit(p, Vector3.ZERO, Basis.from_scale(Vector3(d0, 1.0, d0)), c, lifetime, 0.0, 0.0, d1 / d0 - 1.0, 0.6)
+
+# A comic impact star facing the camera: two crossed bars and a flash.
+func _star(p: Vector3, c: Color, size: float) -> void:
+	var cb := cam.global_transform.basis * Basis(Vector3(0, 0, 1), randf() * PI)
+	add.emit(p, Vector3.ZERO, cb * Basis.from_scale(Vector3(size, size * 0.2, 0.02)), c, 0.13, 0.0, 0.0, 0.7, 0.6)
+	add.emit(p, Vector3.ZERO, cb * Basis.from_scale(Vector3(size * 0.2, size, 0.02)), c, 0.13, 0.0, 0.0, 0.7, 0.6)
+	glow.emit(p, Vector3.ZERO, _cube(size * 1.3), Color(c.r * 0.6, c.g * 0.6, c.b * 0.6), 0.1, 0.0, 0.0, 0.5, 1.0)
 
 # The player shoved; `hit_count` zombies were knocked back.
-func on_shove(_hit_count: int) -> void:
-	pass
+# Costs 9 additive cubes + 4 puffs + 1 ground ring, plus per zombie hit (max 4) 2 cubes, 1 glow, 2 sparks.
+func on_shove(hit_count: int) -> void:
+	var hit := hit_count > 0
+	shv_v += SHV_W * 2.718 * (1.5 if hit else 1.0) * clampf(1.0 - shv / 1.6, 0.2, 1.0)
+	shove_t = 0.0
+	if hit:
+		trauma = minf(trauma + 0.3, 0.7)
+	var f := _flat_fwd()
+	var eye := cam.global_position
+	var c := Color(0.5, 0.65, 0.85) if not hit else Color(0.9, 0.7, 0.3)
+	# the swoosh: an arc of streaks that races out through the shove cone
+	for i in 9:
+		var d := f.rotated(Vector3.UP, deg_to_rad(-40.0 + 10.0 * i + randf_range(-2.0, 2.0)))
+		var b := Basis.looking_at(d, Vector3.UP) * Basis.from_scale(Vector3(0.2, 0.035, 0.12))
+		add.emit(eye + d * 1.1 + Vector3(0, -0.5, 0), d * randf_range(13.0, 16.0), b, c, 0.2, 0.0, 5.5, 2.2, 0.7)
+	var feet := Vector3(eye.x, 0.0, eye.z)
+	_ground_ring(feet + f * 1.2, Color(c.r * 0.5, c.g * 0.5, c.b * 0.5), 1.2, 6.5, 0.24)
+	for i in 4:
+		var d := f.rotated(Vector3.UP, deg_to_rad(randf_range(-35.0, 35.0)))
+		var p := feet + d * randf_range(1.2, 2.4)
+		p.y = Pool.floor_y(p) + 0.12
+		_puffs(p, d + Vector3(0, 0.25, 0), 1, Color(0.55, 0.52, 0.58), 3.0, 0.14)
+	# bonk stars roughly where the shoved zombies stood
+	var n := mini(hit_count, 4)
+	for i in n:
+		var a := (float(i) + 0.5) / n * 70.0 - 35.0 + randf_range(-6.0, 6.0)
+		var d := f.rotated(Vector3.UP, deg_to_rad(a))
+		var p := eye + d * randf_range(1.7, 2.6) + Vector3(0, randf_range(-0.45, -0.1), 0)
+		_star(p, Color(0.95, 0.7, 0.12), 0.5)
+		_sparks(p, d, 2, Color(1.0, 0.9, 0.5), 5.0)
 
 # A blast at `pos` with the given radius (explosive pellets, bloater).
-func explosion(_pos: Vector3, _radius: float) -> void:
-	pass
+# Radius above BIG_BLAST = the toxic lime kind with goo; smaller = a fiery pop.
+func explosion(pos: Vector3, radius: float) -> void:
+	explosion_colored(pos, radius, radius > BIG_BLAST)
 
-# The player picked an upgrade.
+# Same, with the look chosen by the caller. Budget per blast (full / thinned when blasts come
+# faster than every 0.12 s): 1 ground ring, 1 air ring, 2 glows, sparks 5+2r (max 14) / half,
+# smoke 2+r (max 6) / half, chunks 2+r (max 6) / half, toxic only: 10 goo blobs / 5.
+func explosion_colored(pos: Vector3, radius: float, toxic: bool) -> void:
+	var r := clampf(radius, 0.5, 8.0)
+	var q := 0.5 if clock - boom_t < 0.12 else 1.0
+	boom_t = clock
+	var c := TOXIC_COL if toxic else FIRE_COL
+	var hot := c.lerp(Color(1, 1, 0.8), 0.6)
+	if pos.y - Pool.floor_y(pos) < 2.5:
+		_ground_ring(pos, c, r * 0.6, r * 2.56, 0.2 + r * 0.04)
+	ring.emit(pos, Vector3.ZERO, _cube(r * 0.5), Color(c.r * 0.7, c.g * 0.7, c.b * 0.7), 0.2, 0.0, 0.0, 3.2, 0.7)
+	glow.emit(pos, Vector3.ZERO, _cube(r * 2.4), Color(c.r * 0.75, c.g * 0.75, c.b * 0.75), 0.13, 0.0, 0.0, 0.6, 1.0)
+	glow.emit(pos, Vector3.ZERO, _cube(r * 0.9), hot, 0.07, 0.0, 0.0, 0.3, 1.0)
+	var up := Vector3(0, 0.6, 0)
+	for i in int(minf(5.0 + r * 2.0, 14.0) * q):
+		var v := (up + _rv(1.0)).normalized() * randf_range(0.5, 1.0) * (5.0 + r * 2.5)
+		add.emit(pos, v, _cube(randf_range(0.06, 0.11)), hot, randf_range(0.2, 0.4), 12.0, 1.5, 0.0, 1.0)
+	var smoke := Color(0.3, 0.42, 0.22) if toxic else Color(0.33, 0.3, 0.33)
+	_puffs(pos, Vector3.UP, int(minf(2.0 + r, 6.0) * q), smoke, 1.2 + r * 0.6, 0.16 + r * 0.06)
+	for i in int(minf(2.0 + r, 6.0) * q):
+		var cc := GOO.darkened(randf() * 0.4) if toxic else Color(0.3, 0.28, 0.27).lightened(randf() * 0.25)
+		lit.emit(pos + _rv(0.2), _rv(2.0 + r) + Vector3(0, randf_range(3.0, 5.0 + r), 0), _cube(randf_range(0.08, 0.15)),
+			cc, 1.3, 18.0, 0.0, 0.0, 0.3, randf_range(-12, 12), 1)
+	if toxic:
+		_goo_burst(pos + Vector3(0, 0.3, 0), Vector3.UP, int(10 * q), 3.0 + r * 0.5)
+	_pop(pos + Vector3(0, 0.5, 0), c, 3.0 + minf(r, 5.0) * 0.6, 0.12 + r * 0.02, maxf(8.0, r * 3.0))
+	# shake: bigger and closer = harder; a small shell far away adds nothing
+	var d := pos.distance_to(cam.global_position)
+	var k := clampf(1.0 - d / (8.0 + r * 4.0), 0.0, 1.0)
+	trauma = minf(trauma + (0.1 + r * 0.1) * k * q, 0.85)
+
+# The player picked an upgrade: a golden "powered up" burst in front of the camera.
+# Costs 14 additive cubes, 2 air rings, 1 ground ring, 1 glow.
 func on_upgrade() -> void:
-	pass
+	var f := _flat_fwd()
+	var eye := cam.global_position
+	var gold := Color(1.0, 0.82, 0.25)
+	punch = maxf(punch, 0.6)
+	glow.emit(eye + f * 1.6, Vector3.ZERO, _cube(2.6), Color(0.6, 0.48, 0.15), 0.3, 0.0, 0.0, 0.8, 1.0)
+	ring.emit(eye + f * 2.0, Vector3.ZERO, _cube(0.5), gold, 0.4, 0.0, 0.0, 7.0, 0.7)
+	ring.emit(eye + f * 2.0, Vector3.ZERO, _cube(0.3), Color(1, 1, 0.8), 0.3, 0.0, 0.0, 5.0, 0.7)
+	_ground_ring(Vector3(eye.x, 0.0, eye.z), gold, 1.0, 7.0, 0.5)
+	for i in 14:
+		var d := f.rotated(Vector3.UP, deg_to_rad(-70.0 + 140.0 * i / 13.0))
+		var p := eye + d * randf_range(1.3, 2.0) + Vector3(0, randf_range(-1.3, -0.5), 0)
+		add.emit(p, Vector3(0, randf_range(3.0, 6.0), 0) + d * 0.5, Basis.from_scale(Vector3(0.05, 0.16, 0.05)),
+			gold.lerp(Color.WHITE, randf() * 0.3) * 0.85, randf_range(0.45, 0.8), -1.0, 1.5, 0.0, 0.6)
+	_pop(eye + f * 1.2, gold, 3.0, 0.25, 8.0)

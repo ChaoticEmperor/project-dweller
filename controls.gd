@@ -11,6 +11,16 @@ extends Node
 #   fraction of the screen width, so sensitivity is the same on every screen size and
 #   device pixel ratio.
 # - Browsers only allow fullscreen from touchEND (not touchstart), so FULL acts on release.
+#   RES (render resolution) acts on release too: it resizes the viewport, and every finger
+#   still down is rescaled to the new size so the stick and the aim do not jump.
+# - While the HUD shows a modal (the upgrade draft) this script goes completely quiet: held
+#   input is dropped, nothing is emitted, and a finger that is still down when the modal closes
+#   does nothing until it is lifted and pressed again.
+#
+# Bindings: WASD/arrows move, mouse look, LMB fire, RMB or E shove, Space jump, Shift dash,
+# R reload, V view, F fullscreen, G resolution, M mute, [ ] sensitivity.
+# Gamepad: left stick move, right stick look, RT/RB fire, A jump, B/LB/L3 dash, X reload,
+# Y view, R3 (right stick click) shove, Back/Select resolution, d-pad left/right sensitivity.
 
 signal dash            # dash requested
 signal reload          # reload requested
@@ -18,6 +28,7 @@ signal toggle_view     # first/third person
 signal start_pressed   # tap / click / Enter while the game is not running (title or game over)
 signal shove           # melee shove requested
 signal toggle_quality  # switch render resolution
+signal toggle_mute     # sound on/off (M)
 
 # Touch look: radians per full screen-width swipe at medium swipe speed, by SENS level 1..5.
 const SENS := [0.0, 1.1, 1.8, 2.6, 3.5, 4.6]
@@ -77,6 +88,10 @@ var _jump_buf := 0.0
 var _mouse_fire := false
 var _mouse_scale := 1.0         # mouse counts -> CSS pixels (web reports them times devicePixelRatio)
 var _view_w := 640.0
+var _view_size := Vector2(640, 360)
+var _modal := false             # hud.modal_open() as seen by the last _process (see _blocked())
+var _pad_trigger_wait := false  # the trigger was held through a modal: ignore it until released
+var _last_usec := 0
 var _last_touch_ms := -100000
 var _was_active := false
 var _start_block := 0.0
@@ -98,7 +113,18 @@ func setup(hud_node) -> void:
 	_measure()
 
 func _measure() -> void:
-	_view_w = maxf(get_viewport().get_visible_rect().size.x, 1.0)
+	var vs := get_viewport().get_visible_rect().size
+	if vs.x < 1.0 or vs.y < 1.0:
+		return
+	if vs != _view_size:
+		# the render resolution (or window shape) changed under fingers that are still down:
+		# move what we remember of them into the new coordinates
+		var k := vs / _view_size
+		for t: Touch in _touches.values():
+			t.pos *= k
+		_stick_origin *= k
+		_view_size = vs
+	_view_w = vs.x
 	_mouse_scale = 1.0 / maxf(DisplayServer.screen_get_scale(), 0.1) if OS.has_feature("web") else 1.0
 
 # Yaw (x) and pitch (y) change in radians since the last call. Positive x = turn right,
@@ -121,7 +147,26 @@ func set_sens_level(level: int) -> void:
 
 # ---------------- per frame ----------------
 
-func _process(dt: float) -> void:
+func _process(_scaled_dt: float) -> void:
+	# real time, so slow motion / hit-stop (Engine.time_scale) never changes how aiming feels
+	var now := Time.get_ticks_usec()
+	var dt := clampf((now - _last_usec) / 1000000.0, 0.0005, 0.1) if _last_usec > 0 else 1.0 / 60.0
+	_last_usec = now
+
+	var modal := _hud_modal()
+	if modal:
+		if not _modal:
+			_release_all()
+		_modal = true
+		_pad_trigger_wait = true
+		_was_active = game_active
+		_look = Vector2.ZERO
+		move = Vector2.ZERO
+		fire = false
+		jump = false
+		return
+	_modal = false
+
 	if _was_active and not game_active:
 		# just died: let go of everything and ignore the taps that were meant for zombies
 		_release_all()
@@ -141,7 +186,10 @@ func _process(dt: float) -> void:
 		if game_active and r != Vector2.ZERO:
 			# squared response: gentle near the centre, fast at the rim
 			_look += Vector2(r.x, r.y * PITCH_SCALE) * (r.length() * PAD_LOOK_SPEED * _sens_ratio() * dt)
-		pad_fire = _pad_fire or Input.get_joy_axis(_pad, JOY_AXIS_TRIGGER_RIGHT) > 0.5
+		var trigger := Input.get_joy_axis(_pad, JOY_AXIS_TRIGGER_RIGHT) > 0.5
+		if not trigger:
+			_pad_trigger_wait = false
+		pad_fire = _pad_fire or (trigger and not _pad_trigger_wait)
 	move = m.limit_length(1.0)
 
 	if _mouse_fire and Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
@@ -181,7 +229,21 @@ func _notification(what: int) -> void:
 		if hud:
 			_release_all()
 
+func _hud_modal() -> bool:
+	return hud != null and hud.has_method("modal_open") and hud.modal_open()
+
+# True while the HUD owns all input. Stays true until the first frame after the modal closed,
+# so the very tap/click/key that closed it can never also act on the game.
+func _blocked() -> bool:
+	return _modal or _hud_modal()
+
 func _input(ev: InputEvent) -> void:
+	if _blocked():
+		if ev is InputEventScreenTouch:
+			_last_touch_ms = Time.get_ticks_msec()  # still needed to spot browser-made mouse clicks
+		elif ev is InputEventJoypadButton:
+			_pad = ev.device
+		return
 	if ev is InputEventScreenTouch:
 		_last_touch_ms = Time.get_ticks_msec()
 		if not touch_mode:
@@ -220,8 +282,12 @@ func _set_touch_mode(on: bool) -> void:
 
 # ---------------- touch ----------------
 
+# Buttons are looked up by name every time, so a HUD without (say) "shove" or "res" just works.
+func _has_button(name: String) -> bool:
+	return name in hud.BUTTON_NAMES
+
 func _hit(name: String, p: Vector2) -> bool:
-	return hud.button_active(name) and hud.button_rect(name).grow(BUTTON_GROW).has_point(p)
+	return _has_button(name) and hud.button_active(name) and hud.button_rect(name).grow(BUTTON_GROW).has_point(p)
 
 # The button under p; where grown hit areas overlap, the one whose centre is nearest wins.
 func _button_at(p: Vector2) -> String:
@@ -243,7 +309,8 @@ func _touch_down(index: int, p: Vector2) -> void:
 	t.pos = p
 	t.slop = LOOK_SLOP
 	var b := _button_at(p)
-	if b == "full":
+	if b == "full" or b == "res":
+		# work on the title screen too, and act on release (see the notes at the top)
 		t.role = ROLE_BUTTON
 		t.button = b
 		hud.set_button_down(b, true)
@@ -262,6 +329,7 @@ func _touch_down(index: int, p: Vector2) -> void:
 				_jump_held += 1
 				_jump_buf = JUMP_BUFFER
 			"dash": dash.emit()
+			"shove": shove.emit()
 			"reload": reload.emit()
 			"view": toggle_view.emit()
 			"sens": set_sens_level(sens_level % (SENS.size() - 1) + 1)
@@ -289,7 +357,7 @@ func _touch_drag(index: int, p: Vector2) -> void:
 		ROLE_BUTTON:
 			if t.button == "fire":
 				_add_look(t, d)  # hold FIRE and drag to aim; it keeps firing wherever the thumb goes
-			elif not hud.button_rect(t.button).grow(SLIDE_OFF).has_point(p):
+			elif not _has_button(t.button) or not hud.button_rect(t.button).grow(SLIDE_OFF).has_point(p):
 				_release_button(t)
 
 func _touch_up(index: int, act: bool) -> void:
@@ -302,8 +370,11 @@ func _touch_up(index: int, act: bool) -> void:
 	elif t.role == ROLE_BUTTON:
 		var b := t.button
 		_release_button(t)
-		if b == "full" and act and _hit(b, t.pos):
-			toggle_fullscreen()
+		if act and _hit(b, t.pos):
+			if b == "full":
+				toggle_fullscreen()
+			elif b == "res":
+				toggle_quality.emit()
 
 func _add_look(t: Touch, d: Vector2) -> void:
 	if not game_active:
@@ -340,13 +411,14 @@ func _release_button(t: Touch) -> void:
 	match t.button:
 		"fire": _fire_held = maxi(_fire_held - 1, 0)
 		"jump": _jump_held = maxi(_jump_held - 1, 0)
-	hud.set_button_down(t.button, false)
+	if _has_button(t.button):
+		hud.set_button_down(t.button, false)
 	t.role = ROLE_NONE
 	t.button = ""
 
 func _release_all() -> void:
 	for t: Touch in _touches.values():
-		if t.role == ROLE_BUTTON:
+		if t.role == ROLE_BUTTON and _has_button(t.button):
 			hud.set_button_down(t.button, false)
 	_touches.clear()
 	_release_stick()
@@ -363,6 +435,12 @@ func _release_all() -> void:
 # ---------------- mouse, keyboard, gamepad ----------------
 
 func _mouse_button(ev: InputEventMouseButton) -> void:
+	if ev.button_index == MOUSE_BUTTON_RIGHT:
+		# right click shoves, but only in play with the pointer grabbed (never a browser-made click)
+		if ev.pressed and game_active and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED \
+				and Time.get_ticks_msec() - _last_touch_ms >= 700:
+			shove.emit()
+		return
 	if ev.button_index != MOUSE_BUTTON_LEFT:
 		return
 	if not ev.pressed:
@@ -373,6 +451,9 @@ func _mouse_button(ev: InputEventMouseButton) -> void:
 	if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
 		if _hit("full", ev.position):
 			toggle_fullscreen()
+			return
+		if _hit("res", ev.position):
+			toggle_quality.emit()
 			return
 		# This click only grabs the pointer (and starts the game); it does not shoot.
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
@@ -391,6 +472,7 @@ func _key_down(key: int) -> void:
 		KEY_V: toggle_view.emit()
 		KEY_E: shove.emit()
 		KEY_G: toggle_quality.emit()
+		KEY_M: toggle_mute.emit()
 		KEY_R: reload.emit()
 		KEY_F: toggle_fullscreen()
 		KEY_SHIFT: dash.emit()
@@ -419,6 +501,8 @@ func _pad_button(button: int, pressed: bool) -> void:
 		JOY_BUTTON_B, JOY_BUTTON_LEFT_SHOULDER, JOY_BUTTON_LEFT_STICK: dash.emit()
 		JOY_BUTTON_X: reload.emit()
 		JOY_BUTTON_Y: toggle_view.emit()
+		JOY_BUTTON_RIGHT_STICK: shove.emit()
+		JOY_BUTTON_BACK: toggle_quality.emit()
 		JOY_BUTTON_START: _try_start()
 		JOY_BUTTON_DPAD_LEFT: _nudge_sens(-1)
 		JOY_BUTTON_DPAD_RIGHT: _nudge_sens(1)
