@@ -858,3 +858,17 @@ func on_wave(new_wave: int) -> void:
 	wave_str = "WAVE %d" % wave
 	banner_line = WAVE_LINES[(wave - 1) % WAVE_LINES.size()]
 	banner_t = WAVE_BANNER_TIME
+
+# ---- added for the upgrade draft / shove / quality toggle (see SPECS.md) ----
+
+# True while a full-screen choice (the upgrade draft) is waiting for the player.
+func modal_open() -> bool:
+	return false
+
+# Show the upgrade cards ([{id, title, desc, color}]) and call on_pick.call(id) once.
+func show_upgrades(cards: Array, on_pick: Callable) -> void:
+	if not cards.is_empty():
+		on_pick.call(cards[0].id)
+
+func set_quality_label(_text: String) -> void:
+	pass

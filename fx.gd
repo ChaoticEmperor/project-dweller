@@ -828,3 +828,17 @@ func on_reload() -> void:
 	for i in 2:
 		lit.emit(gun.to_global(Vector3(0.05, -0.05, 0.1)), cb.x * randf_range(0.5, 1.2) + Vector3(0, 1.0, 0) + _rv(0.4),
 			cb * Basis.from_scale(Vector3(0.03, 0.03, 0.07)), Color(0.85, 0.2, 0.12), 1.6, 18.0, 0.0, 0.0, 0.3, randf_range(10, 18), 1)
+
+# ---- added for shove / explosions / upgrades (see SPECS.md) ----
+
+# The player shoved; `hit_count` zombies were knocked back.
+func on_shove(_hit_count: int) -> void:
+	pass
+
+# A blast at `pos` with the given radius (explosive pellets, bloater).
+func explosion(_pos: Vector3, _radius: float) -> void:
+	pass
+
+# The player picked an upgrade.
+func on_upgrade() -> void:
+	pass

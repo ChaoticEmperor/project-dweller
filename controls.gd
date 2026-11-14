@@ -16,6 +16,8 @@ signal dash            # dash requested
 signal reload          # reload requested
 signal toggle_view     # first/third person
 signal start_pressed   # tap / click / Enter while the game is not running (title or game over)
+signal shove           # melee shove requested
+signal toggle_quality  # switch render resolution
 
 # Touch look: radians per full screen-width swipe at medium swipe speed, by SENS level 1..5.
 const SENS := [0.0, 1.1, 1.8, 2.6, 3.5, 4.6]
@@ -387,6 +389,8 @@ func _key_down(key: int) -> void:
 	match key:
 		KEY_ESCAPE: Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 		KEY_V: toggle_view.emit()
+		KEY_E: shove.emit()
+		KEY_G: toggle_quality.emit()
 		KEY_R: reload.emit()
 		KEY_F: toggle_fullscreen()
 		KEY_SHIFT: dash.emit()
