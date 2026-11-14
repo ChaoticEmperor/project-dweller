@@ -19,7 +19,7 @@ signal start_pressed   # tap / click / Enter while the game is not running (titl
 
 # Touch look: radians per full screen-width swipe at medium swipe speed, by SENS level 1..5.
 const SENS := [0.0, 1.1, 1.8, 2.6, 3.5, 4.6]
-const DEFAULT_SENS := 2
+const DEFAULT_SENS := 4
 const LOOK_SLOW_GAIN := 0.75   # multiplier for slow, careful drags (precise aiming)
 const LOOK_FAST_GAIN := 1.5    # multiplier for fast flicks (turning around)
 const LOOK_SLOW_SPEED := 0.12  # swipe speed in screen widths per second: at/below = slow gain

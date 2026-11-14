@@ -7,7 +7,8 @@ extends Node3D
 #   fx.gd       - lighting, sky and visual effects
 #   hud.gd      - 2D UI and touch-control visuals
 #   controls.gd - keyboard/mouse/touch input
-#   layout.gd   - shared map dimensions and zombie path helper
+#   layout.gd   - shared map dimensions
+#   nav.gd      - zombie pathfinding (flow field)
 #   build.gd    - shared box-building helpers
 const B = preload("res://build.gd")
 const L = preload("res://layout.gd")
@@ -51,6 +52,7 @@ var started := false
 var move_vel := Vector2.ZERO
 var air_t := 0.0
 var obstacles: Array = []  # [{pos, radius}] big props zombies walk around
+var nav: RefCounted         # flow-field pathfinding (nav.gd)
 
 func _ready() -> void:
 	randomize()
@@ -68,6 +70,12 @@ func _ready() -> void:
 	fx.add_street_lights(clutter.lamp_positions())
 	fx.add_subway_globes([Vector3(6.25, 3.3, 17.15), Vector3(8.75, 3.3, 17.15), Vector3(-6.25, 3.3, -17.15), Vector3(-8.75, 3.3, -17.15)])
 	obstacles = clutter.obstacles()
+	nav = preload("res://nav.gd").new()
+	# the two subway stairwells are solid too
+	var stairs: Array = []
+	for e in L.SUBWAY_ENTRANCES:
+		stairs.append(Rect2(e.x - 1.5, e.z - 3.0, 3.0, 6.0))
+	nav.build(obstacles, stairs)
 	hud = preload("res://hud.gd").new()
 	add_child(hud)
 	hud.build()
@@ -86,13 +94,17 @@ func _ready() -> void:
 #   --god                player takes no damage
 #   --pos=x,z            teleport the player       --yaw=deg  --pitch=deg   aim the camera
 #   --shot=/abs/file.png --t=seconds               save a screenshot after t seconds, then quit
+#   --navtest            print every zombie that fails to make progress toward the player
 var _god := false
+var _navtest := false
+var _nav_t := 0.0
 func _debug_args() -> void:
 	var a := {}
 	for arg in OS.get_cmdline_user_args():
 		var kv := arg.trim_prefix("--").split("=")
 		a[kv[0]] = kv[1] if kv.size() > 1 else ""
 	_god = a.has("god")
+	_navtest = a.has("navtest")
 	if a.has("pos"):
 		var xz: PackedStringArray = a.pos.split(",")
 		player.position = Vector3(float(xz[0]), 0.2, float(xz[1]))
@@ -107,6 +119,21 @@ func _debug_args() -> void:
 		await RenderingServer.frame_post_draw
 		get_viewport().get_texture().get_image().save_png(a.shot)
 		get_tree().quit()
+
+func _nav_check(dt: float) -> void:
+	_nav_t += dt
+	if _nav_t < 3.0:
+		return
+	_nav_t = 0.0
+	var stuck := 0
+	for z in zombies:
+		var p: Vector3 = z.root.position
+		var far: bool = p.distance_to(player.position) > 2.5
+		if z.has("nav_last") and far and p.distance_to(z.nav_last) < 0.6:
+			stuck += 1
+			print("STUCK at ", p.snapped(Vector3(0.1, 0.1, 0.1)))
+		z.nav_last = p
+	print("NAV zombies=", zombies.size(), " stuck=", stuck, " wave=", wave)
 
 func build_player() -> void:
 	player = CharacterBody3D.new()
@@ -247,7 +274,10 @@ func _process(dt: float) -> void:
 	elif zombies.is_empty():
 		next_wave()
 
+	nav.update(player.position)
 	update_zombies(dt)
+	if _navtest:
+		_nav_check(dt)
 	hurt_flash = max(hurt_flash - dt, 0)
 	hud.update_stats({"hp": hp, "ammo": ammo, "max_ammo": MAX_AMMO, "reloading": reloading > 0,
 		"score": score, "wave": wave, "combo": combo, "hurt": clamp(hurt_flash / 0.3, 0.0, 1.0),
@@ -375,15 +405,17 @@ func update_zombies(dt: float) -> void:
 	var t := Time.get_ticks_msec() / 1000.0
 	for z in zombies:
 		var root: Node3D = z.root
-		# head for the player, going round the corner blocks via the intersection
-		var goal: Vector3 = L.nav_target(root.position, player.position)
-		var to: Vector3 = goal - root.position
-		to.y = 0
+		# follow the flow field toward the player (routes round corners and props)
+		var to: Vector3 = nav.direction(root.position, player.position)
 		var to_player: Vector3 = player.position - root.position
 		to_player.y = 0
 		var d := to_player.length()
+		if d < 2.0:
+			to = to_player.normalized()  # close enough: face and lunge straight at the player
 		if to.length() > 0.1:
-			root.look_at(root.global_position - to.normalized(), Vector3.UP)
+			# turn smoothly instead of snapping to the new heading
+			var want := atan2(-to.x, -to.z)
+			root.rotation.y = lerp_angle(root.rotation.y, want, 1.0 - exp(-10.0 * dt))
 		# separation so they don't stack
 		var push := Vector3.ZERO
 		for o in zombies:
@@ -392,22 +424,20 @@ func update_zombies(dt: float) -> void:
 				off.y = 0
 				if off.length() < 0.8 and off.length() > 0.001:
 					push += off.normalized() * (0.8 - off.length())
-		if d > 1.1 and to.length() > 0.05:
-			root.position += to.normalized() * z.speed * dt + push * 3 * dt
-			# slide around big props (cars, bus, barriers)
-			for ob in obstacles:
-				var od: Vector3 = root.position - ob.pos
-				od.y = 0
-				var rr: float = ob.radius + 0.35
-				var ol := od.length()
-				if ol < rr and ol > 0.001:
-					var n := od / ol
-					# push out, plus a sideways nudge so they don't jam nose-first into the prop
-					var side := Vector3(-n.z, 0, n.x)
-					if side.dot(to) < 0:
-						side = -side
-					root.position += n * (rr - ol) + side * z.speed * dt * 0.6
-			root.position = L.clamp_to_streets(root.position, 0.6)
+		if d > 1.1:
+			var step: Vector3 = to * z.speed * dt + push * 3 * dt
+			var np: Vector3 = root.position + step
+			# never step into a prop: slide along it instead
+			if nav.is_blocked(np) and not nav.is_blocked(root.position):
+				var sx := root.position + Vector3(step.x, 0, 0)
+				var sz := root.position + Vector3(0, 0, step.z)
+				if not nav.is_blocked(sx):
+					np = sx
+				elif not nav.is_blocked(sz):
+					np = sz
+				else:
+					np = root.position
+			root.position = L.clamp_to_streets(np, 0.6)
 		# goofy waddle
 		var ph: float = t * z.speed * 3.0 + z.phase
 		z.parts.rotation.z = sin(ph) * 0.15
