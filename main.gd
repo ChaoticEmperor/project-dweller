@@ -3,7 +3,7 @@ extends Node3D
 # main.gd owns the game rules that tie everything together: the player, the gun,
 # scoring, and the flow of a run (waves, rest, upgrade draft, game over).
 # Everything else lives in a module (see SPECS.md for how they talk to each other):
-#   world.gd    - the city (roads, buildings, subway entrances)
+#   world.gd    - the endless city, streamed in round the player (roads, buildings, subway entrances)
 #   clutter.gd  - street props
 #   fx.gd       - lighting, sky and visual effects
 #   hud.gd      - 2D UI and touch-control visuals
@@ -75,23 +75,19 @@ func stat(name: String) -> float:
 func _ready() -> void:
 	randomize()
 	rng.randomize()
+	# the endless city: world.gd streams it in around the player, clutter.gd supplies the
+	# street props, nav.gd keeps a pathfinding window centred on the player
 	world = preload("res://world.gd").new()
 	add_child(world)
-	world.build()
 	clutter = preload("res://clutter.gd").new()
 	add_child(clutter)
-	clutter.build()
+	clutter.setup(world)
+	nav = preload("res://nav.gd").new()
+	world.build(clutter, nav)
 	build_player()
 	fx = preload("res://fx.gd").new()
 	add_child(fx)
 	fx.setup(cam)
-	fx.add_street_lights(clutter.lamp_positions())
-	fx.add_subway_globes([Vector3(6.25, 3.3, 17.15), Vector3(8.75, 3.3, 17.15), Vector3(-6.25, 3.3, -17.15), Vector3(-8.75, 3.3, -17.15)])
-	nav = preload("res://nav.gd").new()
-	var stairs: Array = []  # the two subway stairwells are solid too
-	for e in L.SUBWAY_ENTRANCES:
-		stairs.append(Rect2(e.x - 1.5, e.z - 3.0, 3.0, 6.0))
-	nav.build(clutter.obstacles(), stairs)
 	sfx = preload("res://sfx.gd").new()
 	add_child(sfx)
 	sfx.setup()
@@ -127,6 +123,17 @@ func _ready() -> void:
 	Models.prewarm()  # build the zombie meshes now so the first spawns do not hitch
 	hud.show_title()
 	_debug_args()
+	world.prebuild(player.position)   # build the opening view before the first frame
+	_sync_lights()
+
+# Hand the street lamps and subway globes near the player to fx.gd (when the streamed set changes).
+func _sync_lights() -> void:
+	if world.lights_changed:
+		world.lights_changed = false
+		fx.set_street_lights(world.lamp_positions())
+	if world.globes_changed:
+		world.globes_changed = false
+		fx.set_subway_globes(world.globe_positions())
 
 # Developer/test switches, passed after `--` on the command line (never present on the web):
 #   --autostart          start the game without a click
@@ -135,6 +142,21 @@ func _ready() -> void:
 #   --shot=/abs/file.png --t=seconds               save a screenshot after t seconds, then quit
 #   --navtest            print every zombie that fails to make progress toward the player
 #   --wave=n             start at wave n           --hires   start at 960x540
+#   --run=dx,dz          auto-walk from corner to corner in that direction (streaming tests);
+#   --run=zig            the same, turning at every corner      --dash  dash whenever it is ready
+#   --citystats          print streaming / pathfinding / renderer numbers every 2 s
+var _run := Vector3.ZERO
+var _run_zig := false
+var _run_wp := Vector3.ZERO
+var _run_stuck := 0.0
+var _run_side := 1.0
+var _run_side_t := 0.0
+var _run_last := 0.0
+var _run_tries := 0
+var _auto_dash := false
+var _citystats := false
+var _stat_t := 0.0
+var _stat_dt_max := 0.0
 var _god := false
 var _navtest := false
 var _nav_t := 0.0
@@ -156,6 +178,14 @@ func _debug_args() -> void:
 		player.rotation.y = deg_to_rad(float(a.yaw))
 	if a.has("pitch"):
 		pivot.rotation.x = deg_to_rad(float(a.pitch))
+	if a.has("run"):
+		_run_zig = a.run == "zig"
+		var dxz: PackedStringArray = a.run.split(",")
+		_run = Vector3(1, 0, 0) if _run_zig else Vector3(float(dxz[0]), 0, float(dxz[1])).normalized()
+		_run_wp = (player.position / L.PITCH).round() * L.PITCH + _run * L.PITCH
+		_run_wp.y = 0
+	_auto_dash = a.has("dash")
+	_citystats = a.has("citystats")
 	if a.has("autostart"):
 		begin_game()
 	if a.has("shot"):
@@ -163,6 +193,55 @@ func _debug_args() -> void:
 		await RenderingServer.frame_post_draw
 		get_viewport().get_texture().get_image().save_png(a.shot)
 		get_tree().quit()
+
+# --run: head for the next street corner; side-step when something is in the way.
+func _run_dir(dt: float) -> Vector3:
+	var to := _run_wp - player.position
+	to.y = 0
+	if to.length() < 2.0:
+		if _run_zig:
+			_run = Vector3(0, 0, -1) if _run.x != 0.0 else Vector3(1, 0, 0)
+		_run_wp += _run * L.PITCH
+		to = _run_wp - player.position
+		to.y = 0
+	var d := to.normalized()
+	_run_stuck += dt
+	if _run_stuck > 0.5:
+		# not getting any closer: step to one side (the other side after three tries)
+		_run_stuck = 0.0
+		if _run_last - to.length() < 1.5:
+			_run_tries += 1
+			_run_side_t = 0.45
+			if _run_tries % 3 == 0:
+				_run_side = -_run_side
+		else:
+			_run_tries = 0
+		_run_last = to.length()
+	if _run_side_t > 0.0:
+		_run_side_t -= dt
+		d = (d + d.cross(Vector3.UP) * (_run_side * 1.5)).normalized()
+	return d
+
+func _city_stats(dt: float) -> void:
+	_stat_dt_max = maxf(_stat_dt_max, dt)
+	_stat_t += dt
+	if _stat_t < 2.0:
+		return
+	_stat_t = 0.0
+	var ws: Dictionary = world.stats()
+	print("CITY pos=", player.position.snapped(Vector3.ONE), " tiles=", ws.tiles, " units=", ws.units, " queue=", ws.queue,
+		" verts=", ws.verts, " meshes=", ws.meshes, " bodies=", ws.bodies, " shapes=", ws.shapes, " lamps=", ws.lamps,
+		" gen_max_us=", ws.frame_usec_max, " gen_avg_us=", ws.gen_usec_avg, " holds=", ws.holds,
+		" nav_max_us=", nav.worst_usec, " nav_rebuilds=", nav.rebuilds,
+		" frame_max_ms=", snappedf(_stat_dt_max * 1000.0, 0.1),
+		" nodes=", Performance.get_monitor(Performance.OBJECT_NODE_COUNT), " objects=", Performance.get_monitor(Performance.OBJECT_COUNT),
+		" mem_mb=", snappedf(Performance.get_monitor(Performance.MEMORY_STATIC) / 1048576.0, 0.1),
+		" draws=", Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME),
+		" prims=", Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME),
+		" zombies=", zombies.list.size(), " step_max_us=", ws.step_usec_max, " ", ws.step_worst, " jobs=", ws.jobs)
+	world.reset_stats()
+	nav.worst_usec = 0
+	_stat_dt_max = 0.0
 
 func _nav_check(dt: float) -> void:
 	_nav_t += dt
@@ -311,6 +390,11 @@ func _process(dt: float) -> void:
 	# smooth on 90/120 Hz phone screens.
 	controls.game_active = started and not dead and not drafting
 	var look: Vector2 = controls.take_look()
+	world.update(player.position)   # stream the city (also behind the title screen)
+	if world.lights_changed or world.globes_changed:
+		_sync_lights()
+	if _citystats:
+		_city_stats(dt)
 	if not started or dead or drafting:
 		return
 	player.rotate_y(-look.x)
@@ -319,6 +403,10 @@ func _process(dt: float) -> void:
 	# movement
 	var inp: Vector2 = controls.move
 	var dir := player.transform.basis * Vector3(inp.x, 0, inp.y)
+	if _run != Vector3.ZERO:
+		dir = _run_dir(dt)
+	if _auto_dash:
+		dash_req = true
 	var speed := stat("move_speed")
 	dash_cd -= dt
 	shove_cd -= dt
@@ -352,7 +440,8 @@ func _process(dt: float) -> void:
 	if was_air and player.is_on_floor():
 		fx.on_land(-vy)
 		sfx.play("land")
-	var cl: Vector3 = L.clamp_to_streets(player.position, 0.5)
+	# stay on walkable ground, and out of any part of the city that is not built yet
+	var cl: Vector3 = world.hold(L.clamp_to_streets(player.position, 0.5))
 	player.position.x = cl.x
 	player.position.z = cl.z
 	if player.position.y < -5:
