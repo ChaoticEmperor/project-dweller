@@ -103,8 +103,9 @@ class Pool:
 			axis[i] = Vector3(randf() - 0.5, randf() - 0.5, randf() - 0.5).normalized()
 
 	static func floor_y(p: Vector3) -> float:
-		# road is the plus through the middle, everything else in the corridors is raised sidewalk
-		return 0.0 if (absf(p.x) <= 6.0 or absf(p.z) <= 6.0) else 0.15
+		# roads repeat every block in the endless city; everything else walkable is raised sidewalk
+		var lay = preload("res://layout.gd")
+		return 0.0 if (absf(lay.lat(p.x)) <= 6.0 or absf(lay.lat(p.z)) <= 6.0) else 0.15
 
 	func update(dt: float) -> void:
 		if live == 0:
@@ -524,13 +525,27 @@ func attach_gun(g: Node3D) -> void:
 # ---------------------------------------------------------------- street lamps / subway globes
 # Called once after setup() with the street-lamp head positions from clutter.gd.
 func add_street_lights(positions: Array) -> void:
+	# The endless city replaces the lamp set as the player walks. Remember where each real
+	# light is sitting so it stays lit on the same lamp instead of blinking off and on.
+	var held: Array = []
+	for i in LAMP_LIGHTS:
+		held.append(lamps[lamp_cur[i]] if lamp_cur[i] >= 0 and lamp_cur[i] < lamps.size() else null)
 	lamps.clear()
 	for p in positions:
 		lamps.append(p)
 	flicker_i = lamps.size() / 3 if lamps.size() > 2 else -1
 	for i in LAMP_LIGHTS:
-		lamp_cur[i] = -1
-		lamp_want[i] = -1
+		var keep := -1
+		if held[i] != null:
+			for j in lamps.size():
+				if lamps[j].distance_squared_to(held[i]) < 0.04:
+					keep = j
+					break
+		lamp_cur[i] = keep
+		lamp_want[i] = keep
+		if keep < 0:
+			lamp_lights[i].light_energy = 0.0
+	lamp_scan = 0.0
 	_rebuild_static()
 
 # Optional: exact world positions of the green subway globe lamps (replaces the default guess).
@@ -603,9 +618,20 @@ func _update_lamps(dt: float) -> void:
 		lamp_scan = 0.25
 		# aim a little ahead of the camera so lamps in view win
 		var c := cam.global_position - cam.global_transform.basis.z * 4.0
-		var order: Array = range(lamps.size())
-		order.sort_custom(func(a, b): return lamps[a].distance_squared_to(c) < lamps[b].distance_squared_to(c))
-		var want: Array = order.slice(0, LAMP_LIGHTS)
+		# nearest few lamps by a single pass (the city can hand us ~100 lamps; no full sort)
+		var want: Array = []
+		var want_d: Array = []
+		for j in lamps.size():
+			var dj: float = lamps[j].distance_squared_to(c)
+			var k := want.size()
+			while k > 0 and want_d[k - 1] > dj:
+				k -= 1
+			if k < LAMP_LIGHTS:
+				want.insert(k, j)
+				want_d.insert(k, dj)
+				if want.size() > LAMP_LIGHTS:
+					want.pop_back()
+					want_d.pop_back()
 		var free_slots: Array = []
 		for i in LAMP_LIGHTS:
 			if lamp_want[i] in want:
