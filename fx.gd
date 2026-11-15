@@ -1045,3 +1045,11 @@ func on_upgrade() -> void:
 		add.emit(p, Vector3(0, randf_range(3.0, 6.0), 0) + d * 0.5, Basis.from_scale(Vector3(0.05, 0.16, 0.05)),
 			gold.lerp(Color.WHITE, randf() * 0.3) * 0.85, randf_range(0.45, 0.8), -1.0, 1.5, 0.0, 0.6)
 	_pop(eye + f * 1.2, gold, 3.0, 0.25, 8.0)
+
+# Replace the whole set of street lamps / subway globes (the endless city calls these
+# whenever the blocks around the player change). Same as add_* but named for that use.
+func set_street_lights(positions: Array) -> void:
+	add_street_lights(positions)
+
+func set_subway_globes(positions: Array) -> void:
+	add_subway_globes(positions)

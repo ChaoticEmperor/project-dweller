@@ -11,6 +11,8 @@ extends Node3D
 #   zombies.gd  - zombie types, spawning, wave pacing, movement, attacks
 #   models.gd / zombie_rig.gd - how characters and the gun look and animate
 #   sfx.gd      - sound, synthesised in code
+#   weapons.gd  - the guns: inventory, firing, reloading, the first-person gun model
+#   drops.gd    - weapon crates and airdrops
 #   upgrades.gd - between-wave upgrades (modifiers on the stats below)
 #   nav.gd      - zombie pathfinding (flow field)
 #   layout.gd / build.gd - shared map dimensions and box helpers
@@ -36,17 +38,18 @@ var zombies: Node3D
 var sfx: Node
 var upgrades: RefCounted
 var nav: RefCounted
+var weapons: Node
+var drops: Node3D
+
+signal wave_started(n: int)
+signal wave_ended(n: int)
 
 var player: CharacterBody3D
 var cam: Camera3D
 var pivot: Node3D
-var gun: Node3D
 var body_mesh: Node3D
 
 var hp := 100.0
-var ammo := 8
-var reloading := 0.0
-var fire_cd := 0.0
 var score := 0
 var combo := 0
 var combo_t := 0.0
@@ -56,7 +59,6 @@ var dash_cd := 0.0
 var dash_req := false
 var shove_cd := 0.0
 var third_person := false
-var recoil := 0.0
 var dead := false
 var hurt_flash := 0.0
 var started := false
@@ -65,7 +67,6 @@ var rest_t := -1.0         # >0 while resting between waves
 var move_vel := Vector2.ZERO
 var air_t := 0.0
 var hi_res := false
-var pump_t := 0.0           # >0 while the shotgun's pump is sliding
 var rng := RandomNumberGenerator.new()
 
 func stat(name: String) -> float:
@@ -84,7 +85,6 @@ func _ready() -> void:
 	fx = preload("res://fx.gd").new()
 	add_child(fx)
 	fx.setup(cam)
-	fx.attach_gun(gun)
 	fx.add_street_lights(clutter.lamp_positions())
 	fx.add_subway_globes([Vector3(6.25, 3.3, 17.15), Vector3(8.75, 3.3, 17.15), Vector3(-6.25, 3.3, -17.15), Vector3(-8.75, 3.3, -17.15)])
 	nav = preload("res://nav.gd").new()
@@ -98,6 +98,12 @@ func _ready() -> void:
 	sfx.set_listener(cam)
 	upgrades = preload("res://upgrades.gd").new()
 	upgrades.reset()
+	weapons = preload("res://weapons.gd").new()
+	add_child(weapons)
+	weapons.setup(self)
+	drops = preload("res://drops.gd").new()
+	add_child(drops)
+	drops.setup(self)
 	zombies = preload("res://zombies.gd").new()
 	add_child(zombies)
 	zombies.setup(self)
@@ -112,7 +118,7 @@ func _ready() -> void:
 	add_child(controls)
 	controls.setup(hud)
 	controls.dash.connect(func(): dash_req = true)
-	controls.reload.connect(start_reload)
+	controls.reload.connect(func(): weapons.start_reload())
 	controls.toggle_view.connect(toggle_view)
 	controls.start_pressed.connect(begin_game)
 	controls.shove.connect(do_shove)
@@ -200,10 +206,6 @@ func build_player() -> void:
 	cam.fov = 85
 	cam.far = 300
 	pivot.add_child(cam)
-	gun = Models.make_gun()
-	cam.add_child(gun)
-	gun.position = Vector3(0.25, -0.22, -0.45)
-	gun.scale = Vector3.ONE * 0.6
 
 func begin_game() -> void:
 	if dead:
@@ -217,7 +219,7 @@ func begin_game() -> void:
 func toggle_view() -> void:
 	third_person = not third_person
 	body_mesh.visible = third_person
-	gun.visible = not third_person
+	weapons.set_view_visible(not third_person)
 	cam.position = Vector3(0.6, 0.4, 3.0) if third_person else Vector3.ZERO
 
 # Switch between the chunky 640x360 look and a sharper 960x540.
@@ -225,12 +227,6 @@ func toggle_quality() -> void:
 	hi_res = not hi_res
 	get_window().content_scale_size = Vector2i(960, 540) if hi_res else Vector2i(640, 360)
 	hud.set_quality_label("540P" if hi_res else "360P")
-
-func start_reload() -> void:
-	if reloading <= 0 and ammo < int(stat("max_ammo")) and started and not dead:
-		reloading = stat("reload_time")
-		fx.on_reload()
-		sfx.play("reload")
 
 func do_shove() -> void:
 	if not started or dead or drafting or shove_cd > 0:
@@ -250,9 +246,11 @@ func next_wave() -> void:
 	fx.on_wave(wave)
 	sfx.play("wave_start")
 	zombies.start_wave(wave)
+	wave_started.emit(wave)
 
 func _on_wave_cleared(_n: int) -> void:
 	sfx.play("wave_clear")
+	wave_ended.emit(_n)
 	rest_t = 2.0  # short breather, then the upgrade draft (if any), then the next wave
 
 func _start_draft() -> void:
@@ -271,7 +269,7 @@ func _on_upgrade_picked(id: String) -> void:
 	upgrades.take(id)
 	sfx.play("upgrade_pick")
 	fx.on_upgrade()
-	ammo = int(stat("max_ammo"))
+	weapons.refill()
 	hp = min(hp, stat("max_hp"))  # an upgrade can lower max health
 	if not controls.touch_mode:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
@@ -360,28 +358,8 @@ func _process(dt: float) -> void:
 	if player.position.y < -5:
 		player.position.y = 1.0
 
-	# shooting
-	fire_cd -= dt
-	if reloading > 0:
-		reloading -= dt
-		gun.rotation.x = -0.8
-		if reloading <= 0:
-			ammo = int(stat("max_ammo"))
-			gun.rotation.x = 0
-			sfx.play("pump")
-	elif controls.fire and fire_cd <= 0:
-		if ammo > 0:
-			shoot()
-		else:
-			sfx.play("empty")
-			start_reload()
-	recoil = lerp(recoil, 0.0, dt * 12)
-	if pump_t > 0:
-		pump_t = max(pump_t - dt, 0.0)
-		Models.gun_pump(gun, sin(PI * (1.0 - pump_t / 0.25)))
-	gun.position.z = -0.45 + recoil * 0.15
-	if reloading <= 0:
-		gun.rotation.x = recoil * 0.5
+	weapons.update(dt)
+	drops.update(dt)
 	# head bob + shake
 	var t := Time.get_ticks_msec() / 1000.0
 	var bob := sin(t * 14) * 0.04 * dir.length() if player.is_on_floor() else 0.0
@@ -403,42 +381,10 @@ func _process(dt: float) -> void:
 	if _navtest:
 		_nav_check(dt)
 	hurt_flash = max(hurt_flash - dt, 0)
-	hud.update_stats({"hp": hp, "max_hp": stat("max_hp"), "ammo": ammo, "max_ammo": int(stat("max_ammo")),
-		"reloading": reloading > 0, "reload_frac": clamp(1.0 - reloading / stat("reload_time"), 0.0, 1.0),
+	hud.update_stats({"hp": hp, "max_hp": stat("max_hp"), "ammo": weapons.ammo, "max_ammo": weapons.max_ammo(),
+		"reloading": weapons.reloading > 0, "reload_frac": weapons.reload_frac(), "weapon": weapons.hud_info(),
 		"score": score, "wave": wave, "combo": combo, "combo_frac": clamp(combo_t / stat("combo_time"), 0.0, 1.0),
 		"hurt": clamp(hurt_flash / 0.3, 0.0, 1.0),
 		"dash_ready": clamp(1.0 - dash_cd / stat("dash_cd"), 0.0, 1.0),
 		"shove_ready": clamp(1.0 - shove_cd / stat("shove_cd"), 0.0, 1.0),
 		"zombies_left": zombies.alive_count()})
-
-func shoot() -> void:
-	ammo -= 1
-	fire_cd = stat("fire_cd")
-	recoil = 1.0
-	pump_t = 0.25
-	fx.on_shoot()
-	sfx.play("shoot", randf_range(0.95, 1.05))
-	var space := get_world_3d().direct_space_state
-	var boomed := false
-	for i in int(stat("pellets")):
-		var spread := Vector3(randf_range(-1, 1), randf_range(-1, 1), 0) * stat("spread") if i > 0 else Vector3.ZERO
-		var from := cam.global_position
-		var fwd := (-cam.global_transform.basis.z + cam.global_transform.basis * spread).normalized()
-		var q := PhysicsRayQueryParameters3D.create(from, from + fwd * 80)
-		q.exclude = [player.get_rid()]
-		q.collide_with_areas = true
-		var hit := space.intersect_ray(q)
-		if hit.is_empty():
-			continue
-		var col: Object = hit.collider
-		if col is Area3D and col.has_meta("zombie"):
-			var head: bool = col.get_meta("head")
-			zombies.hit(col.get_meta("zombie"), stat("damage") * (stat("head_mult") if head else 1.0), head, hit.position, fwd)
-		else:
-			fx.impact(hit.position, hit.normal)
-		# explosive pellets upgrade: one small blast per shot, at the first thing hit
-		if stat("explosive_radius") > 0 and not boomed:
-			boomed = true
-			zombies.damage_radius(hit.position, stat("explosive_radius"), stat("damage"))
-			fx.explosion(hit.position, stat("explosive_radius"))
-			sfx.play_at("explode", hit.position)

@@ -15,16 +15,13 @@ may be relied on by other files, so **signatures and meanings below must not cha
 - Tone: comedic, blocky, original designs. New York street intersection at dusk.
 - Map facts are in `layout.gd`; ground is flat at y = 0; +Y up; characters face -Z.
 
-## Who owns what
-| File | Owner (sprint 2) | Role |
+## Who owns what (sprint 3)
+| File | Owner | Role |
 |---|---|---|
-| `main.gd`, `layout.gd`, `build.gd`, `nav.gd`, `SPECS.md` | lead | game flow, glue, shared helpers |
-| `sfx.gd` | audio | all sound |
-| `models.gd`, `zombie_rig.gd`, `textures.gd` (new, optional) | art | character/gun looks and animation |
-| `zombies.gd` | zombies | types, AI, spawning, wave pacing |
-| `upgrades.gd`, `hud.gd` | upgrades+UI | upgrade pool, draft screen, HUD |
-| `fx.gd`, `controls.gd` | juice | visual effects, camera feel, input |
-| `world.gd`, `clutter.gd` | (not in this sprint — do not edit) | city and props |
+| `main.gd` (except world set-up lines), `build.gd`, `SPECS.md` (shared sections) | lead | game flow, glue |
+| `weapons.gd`, `drops.gd`, `gun_models.gd` (new), `upgrades.gd`, `hud.gd`, `controls.gd`, `sfx.gd`, `fx.gd` | weapons agent | guns, combat mechanics, crates and airdrops, their UI/input/sound/effects |
+| `world.gd`, `clutter.gd`, `layout.gd`, `nav.gd`, world-related lines of `main.gd` and `zombies.gd` | city agent | the endless streamed city, pathfinding window, spawn positions |
+| `models.gd`, `zombie_rig.gd`, rest of `zombies.gd` | (not in this sprint — do not edit beyond what is listed above) | zombie looks and behaviour |
 
 ## main.gd (lead) — what other modules may read
 - `main.player: CharacterBody3D` (feet at `position`, eye at +1.6), `main.cam: Camera3D`, `main.nav`, `main.fx`, `main.sfx`,
@@ -34,6 +31,7 @@ may be relied on by other files, so **signatures and meanings below must not cha
   `max_ammo 8`, `move_speed 9`, `dash_cd 0.8`, `dash_speed 28`, `max_hp 100`, `wave_heal 25`,
   `heal_on_headshot 0`, `shove_cd 1.2`, `shove_reach 3.5`, `shove_arc 80` (degrees), `shove_force 9`,
   `shove_damage 0`, `explosive_radius 0`, `score_mult 1`, `combo_time 2`.
+- Signals: `wave_started(n)`, `wave_ended(n)`.
 - Flow: title → `begin_game` → `next_wave` → `zombies.start_wave(n)` … `wave_cleared` → 2 s rest →
   `upgrades.roll(3)` → `hud.show_upgrades` → pick → `upgrades.take` → `next_wave`.
 - Debug switches after `--`: `--autostart --god --pos=x,z --yaw=deg --pitch=deg --shot=/abs.png --t=sec --navtest --wave=n --hires`.
@@ -85,6 +83,23 @@ may be relied on by other files, so **signatures and meanings below must not cha
   zombie_attack bloater_swell explode boss_step`.
 - Called by: main (player and scoring sounds), zombies.gd (`zombie_*`, `bloater_swell`, `explode`, `boss_step` via `play_at`),
   hud.gd (`ui_click`).
+
+## weapons.gd (extends Node)
+- `setup(main)`; `update(dt)` — main calls it every frame while playing (not during the upgrade draft). It reads
+  `main.controls.fire`, fires, reloads, animates the gun model and calls `main.zombies.hit(...)`, `main.fx`, `main.sfx`.
+- Vars: `current: String` (weapon id), `owned: Array` of ids, `ammo: int` (in the current weapon), `reloading: float`, `gun: Node3D`.
+- `max_ammo() -> int`, `reload_frac() -> float`, `hud_info() -> Dictionary` (`id, name, ammo, max_ammo, reserve` (-1 = infinite),
+  `slots, reloading, reload_frac`), `give(id, rounds := -1)`, `has(id)`, `switch_to(id)`, `next()`, `refill()`,
+  `start_reload()`, `set_view_visible(on)`.
+- Signals: `fired(id)`, `weapon_changed(id)`, `picked_up(id)`.
+- Upgrade stats apply on top of each weapon's own base numbers: `main.upgrades.stat(name, weapon_base_value)`.
+- Hit detection: ray casts against `Area3D` hit boxes carrying meta `"zombie"` and `"head"`; anything else is scenery.
+
+## drops.gd (extends Node3D)
+- `setup(main)`, `update(dt)` (every frame while playing), `clear()`.
+- Decides when crates/airdrops appear (listen to `main.wave_started` / `main.wave_ended`), where they land (a free street
+  spot near the player: `L.clamp_to_streets(p, margin)` and `not main.nav.is_blocked(p)`), and what they give
+  (`main.weapons.give(id)`, ammo, health via `main.hp`, temporary power-ups).
 
 ## upgrades.gd (extends RefCounted)
 - `reset()`, `roll(n: int, rng) -> [{id, title, desc, color}]` (empty = no draft), `take(id)`, `level(id) -> int`,
