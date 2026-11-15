@@ -139,6 +139,11 @@ func toggle_fullscreen() -> void:
 		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
 	else:
 		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
+		if OS.has_feature("web"):
+			# On phones, fullscreen can also lock the screen to landscape (Android Chrome
+			# allows this only while fullscreen; other browsers ignore or refuse it).
+			await get_tree().create_timer(0.3, true, false, true).timeout
+			JavaScriptBridge.eval("try{if(screen.orientation&&screen.orientation.lock){screen.orientation.lock('landscape').catch(function(){})}}catch(e){}", true)
 
 func set_sens_level(level: int) -> void:
 	sens_level = clampi(level, 1, SENS.size() - 1)

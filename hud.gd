@@ -846,6 +846,10 @@ func _draw_title(o: Control, cx: float) -> void:
 
 	if _blink():
 		_text(o, "TAP TO START" if touch_mode else "CLICK TO START", Vector2(cx, 282), 2, YELLOW, 1)
+	if vs.y > vs.x:
+		# held upright: the game is designed for landscape
+		_text(o, "TURN YOUR PHONE SIDEWAYS", Vector2(cx, 330), 2, CYAN, 1)
+		_text(o, "THIS GAME IS PLAYED IN LANDSCAPE", Vector2(cx, 352), 1, _a(PAPER, 0.85), 1)
 	if best_score > 0:
 		_text(o, "BEST %d" % best_score, Vector2(cx, 306), 1, CYAN, 1)
 	_text(o, "HEADSHOTS SCORE MORE - CHAIN KILLS FOR COMBOS", Vector2(cx, vs.y - 16), 1, _a(PAPER, 0.7), 1)
