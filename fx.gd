@@ -248,7 +248,11 @@ var clock := 0.0
 
 var shot_pending := false
 var shot_tracers := 0
+var shot_expect := 5          # pellets of the current shot; ones that hit nothing get a tracer into the haze
 var muzzle_pos := Vector3.ZERO
+var muzzle_local := Vector3(0, 0, -0.3)   # barrel tip in the gun node's space (set_muzzle)
+var tr_col := Color(0.75, 0.6, 0.3)       # look of the current shot's tracers
+var tr_w := 0.035
 
 var lamps: Array[Vector3] = []
 var globes: Array[Vector3] = []
@@ -481,9 +485,16 @@ func _build_ambient() -> void:
 		add_child(st)
 
 # Called once with the first-person gun node (child of the camera, barrel points along -Z).
+# weapons.gd passes one holder node that every weapon model lives in; calling this again moves
+# the muzzle flash over to the new node.
 func attach_gun(g: Node3D) -> void:
 	gun = g
 	gun_base = g.position
+	if flash != null:
+		if flash.get_parent() != null:
+			flash.get_parent().remove_child(flash)
+		gun.add_child(flash)
+		return
 	# one merged cartoon star: a forward spike plus crossed blades
 	var st := SurfaceTool.new()
 	var bm := BoxMesh.new()
@@ -649,7 +660,7 @@ func _process(dt: float) -> void:
 		# pellets that hit nothing still get a tracer, out into the haze
 		shot_pending = false
 		var cb := cam.global_transform.basis
-		for i in 5 - shot_tracers:
+		for i in shot_expect - shot_tracers:
 			var d := (-cb.z + cb.x * randf_range(-0.03, 0.03) + cb.y * randf_range(-0.03, 0.03)).normalized()
 			_tracer(cam.global_position + d * 55.0)
 	lit.update(dt)
@@ -781,8 +792,8 @@ func _tracer(to: Vector3) -> void:
 	var up := Vector3.UP if absf(d.y) < 0.98 else Vector3.RIGHT
 	# a streak covering the outer part of the path, so it reads as moving away
 	var seg := dist * 0.7
-	var b := Basis.looking_at(d, up) * Basis.from_scale(Vector3(0.035, 0.035, seg))
-	add.emit(to - d * seg * 0.5, Vector3.ZERO, b, Color(0.75, 0.6, 0.3), 0.07, 0.0, 0.0, 0.0, 1.0)
+	var b := Basis.looking_at(d, up) * Basis.from_scale(Vector3(tr_w, tr_w, seg))
+	add.emit(to - d * seg * 0.5, Vector3.ZERO, b, tr_col, 0.07, 0.0, 0.0, 0.0, 1.0)
 
 func _sparks(p: Vector3, dir: Vector3, n: int, c: Color, speed: float) -> void:
 	for i in n:
@@ -803,31 +814,60 @@ func _goo_burst(p: Vector3, dir: Vector3, n: int, speed: float) -> void:
 
 # ---------------------------------------------------------------- events
 # The player fired.
+# (The original single-shotgun call: a full kick, five tracers, a red shell.)
 func on_shoot() -> void:
+	on_fire(1.0, 1.0, Color(0.75, 0.6, 0.3), 0.035, Color(0.85, 0.2, 0.12))
+	shot_expect = 5
+
+# Where the barrel tip of the current weapon model is, in the gun node's space.
+func set_muzzle(local: Vector3) -> void:
+	muzzle_local = local + Vector3(0, 0, -0.02)
+	if flash:
+		flash.position = local + Vector3(0, 0, 0.04)
+
+# Any weapon fired. kick: recoil in "shotgun shots" (0 = none); flash_k: muzzle flash size (0 = no
+# flash, e.g. a crossbow); tracer colour / width for this shot; shell: colour of the ejected
+# casing (alpha 0 = none). After this, impact() / zombie_hit() draw a tracer to each hit and
+# tracer_to() to anywhere else, until end_shot().
+func on_fire(kick := 1.0, flash_k := 1.0, tracer := Color(0.75, 0.6, 0.3), tracer_w := 0.035, shell := Color(0, 0, 0, 0)) -> void:
 	# directional kick: an impulse into the recoil spring; the closer to the cap, the less it adds
-	rec_v += REC_W * 2.718 * clampf(1.0 - rec / REC_MAX, 0.2, 1.0)
+	rec_v += REC_W * 2.718 * kick * clampf(1.0 - rec / REC_MAX, 0.2, 1.0)
 	shot_pending = true
 	shot_tracers = 0
+	shot_expect = 0
+	tr_col = tracer
+	tr_w = tracer_w
 	if gun == null:
 		return
-	muzzle_pos = gun.to_global(Vector3(0, 0.0, -0.3))
-	if flash:
-		flash.visible = true
-		flash.rotation.z = randf() * TAU
-		flash.scale = Vector3(randf_range(0.55, 0.9), randf_range(0.55, 0.9), randf_range(0.7, 1.2))
-	flash_t = 0.05
-	flash_new = true
-	warm = 0
-	muzzle_light.global_position = muzzle_pos
-	muzzle_light.visible = true
-	muzzle_light.light_energy = 2.6
-	glow.emit(muzzle_pos - cam.global_transform.basis.z * 0.25, Vector3.ZERO, _cube(0.7), Color(0.8, 0.45, 0.15), 0.06, 0.0, 0.0, 0.4, 1.0)
-	# wisp of smoke + the spent shell
+	muzzle_pos = gun.to_global(muzzle_local)
 	var cb := cam.global_transform.basis
-	goo.emit(muzzle_pos - cb.z * 0.5, -cb.z * 2.5 + Vector3(0, 0.6, 0), _cube(0.04), Color(0.5, 0.47, 0.55), 0.35, -0.5, 3.0, 1.2, 0.7)
-	var shell := cb * Basis.from_scale(Vector3(0.03, 0.03, 0.07))
-	lit.emit(gun.to_global(Vector3(0.06, 0.05, 0.05)), cb.x * randf_range(1.8, 2.6) + cb.y * randf_range(2.2, 3.2) - cb.z * 0.5,
-		shell, Color(0.85, 0.2, 0.12), 1.2, 18.0, 0.0, 0.0, 0.3, randf_range(14, 22), 1)
+	if flash_k > 0.0:
+		if flash:
+			flash.visible = true
+			flash.rotation.z = randf() * TAU
+			flash.scale = Vector3(randf_range(0.55, 0.9), randf_range(0.55, 0.9), randf_range(0.7, 1.2)) * flash_k
+		flash_t = 0.05
+		flash_new = true
+		warm = 0
+		muzzle_light.global_position = muzzle_pos
+		muzzle_light.visible = true
+		muzzle_light.light_energy = 2.6
+		glow.emit(muzzle_pos - cb.z * 0.25, Vector3.ZERO, _cube(0.7 * flash_k), Color(0.8, 0.45, 0.15), 0.06, 0.0, 0.0, 0.4, 1.0)
+		# wisp of smoke
+		goo.emit(muzzle_pos - cb.z * 0.5, -cb.z * 2.5 + Vector3(0, 0.6, 0), _cube(0.04), Color(0.5, 0.47, 0.55), 0.35, -0.5, 3.0, 1.2, 0.7)
+	if shell.a > 0.0:
+		var sb := cb * Basis.from_scale(Vector3(0.03, 0.03, 0.07))
+		lit.emit(gun.to_global(Vector3(0.06, 0.05, 0.05)), cb.x * randf_range(1.8, 2.6) + cb.y * randf_range(2.2, 3.2) - cb.z * 0.5,
+			sb, shell, 1.2, 18.0, 0.0, 0.0, 0.3, randf_range(14, 22), 1)
+
+# A tracer of the current shot to a point nothing was hit at (a miss into the haze, the far
+# end of a piercing shot).
+func tracer_to(pos: Vector3) -> void:
+	_tracer(pos)
+
+# The current shot's ray casts are done: later hits (blasts, burning puddles) draw no tracers.
+func end_shot() -> void:
+	shot_pending = false
 
 # A bullet hit scenery at `pos` (surface normal `normal`).
 func impact(pos: Vector3, normal: Vector3) -> void:
@@ -1031,11 +1071,14 @@ func explosion_colored(pos: Vector3, radius: float, toxic: bool) -> void:
 # The player picked an upgrade: a golden "powered up" burst in front of the camera.
 # Costs 14 additive cubes, 2 air rings, 1 ground ring, 1 glow.
 func on_upgrade() -> void:
+	power_burst(Color(1.0, 0.82, 0.25))
+
+# The same burst in any colour (power-ups, bonk frenzy).
+func power_burst(gold: Color) -> void:
 	var f := _flat_fwd()
 	var eye := cam.global_position
-	var gold := Color(1.0, 0.82, 0.25)
 	punch = maxf(punch, 0.6)
-	glow.emit(eye + f * 1.6, Vector3.ZERO, _cube(2.6), Color(0.6, 0.48, 0.15), 0.3, 0.0, 0.0, 0.8, 1.0)
+	glow.emit(eye + f * 1.6, Vector3.ZERO, _cube(2.6), Color(gold.r * 0.6, gold.g * 0.6, gold.b * 0.6), 0.3, 0.0, 0.0, 0.8, 1.0)
 	ring.emit(eye + f * 2.0, Vector3.ZERO, _cube(0.5), gold, 0.4, 0.0, 0.0, 7.0, 0.7)
 	ring.emit(eye + f * 2.0, Vector3.ZERO, _cube(0.3), Color(1, 1, 0.8), 0.3, 0.0, 0.0, 5.0, 0.7)
 	_ground_ring(Vector3(eye.x, 0.0, eye.z), gold, 1.0, 7.0, 0.5)
@@ -1053,3 +1096,103 @@ func set_street_lights(positions: Array) -> void:
 
 func set_subway_globes(positions: Array) -> void:
 	add_subway_globes(positions)
+
+# ---------------------------------------------------------------- weapons, projectiles, drops
+# Everything below reuses the pools above (no new nodes, materials or shaders).
+
+# The additive, unshaded, vertex-coloured material of the spark pool, for other scripts'
+# glowing meshes (drop beams) so they do not compile a shader of their own.
+func additive_material() -> Material:
+	return add.node.material_override
+
+# A melee swing: a fast arc of streaks from right to left, a short lunge, bonk stars on hits.
+# Costs 7 additive cubes, plus per zombie hit (max 4) 2 cubes, 1 glow, 2 sparks.
+func on_swing(hit_count: int) -> void:
+	var hit := hit_count > 0
+	shv_v += SHV_W * 2.718 * (0.9 if hit else 0.5) * clampf(1.0 - shv / 1.6, 0.2, 1.0)
+	if hit:
+		trauma = minf(trauma + 0.22, 0.6)
+	var f := _flat_fwd()
+	var eye := cam.global_position
+	var c := Color(0.22, 0.22, 0.26) if not hit else Color(0.45, 0.36, 0.14)
+	for i in 7:
+		var d := f.rotated(Vector3.UP, deg_to_rad(-48.0 + 16.0 * i))
+		var side := d.cross(Vector3.UP)
+		var b := Basis.looking_at(side, Vector3.UP) * Basis.from_scale(Vector3(0.03, 0.025, 0.42))
+		add.emit(eye + d * 1.5 + Vector3(0, -0.25 - 0.03 * i, 0), -side * 9.0 + d * 3.0, b, c, 0.14, 0.0, 6.0, 0.6, 0.7)
+	var n := mini(hit_count, 4)
+	for i in n:
+		var a := (float(i) + 0.5) / n * 80.0 - 40.0 + randf_range(-6.0, 6.0)
+		var d := f.rotated(Vector3.UP, deg_to_rad(a))
+		var p := eye + d * randf_range(1.6, 2.4) + Vector3(0, randf_range(-0.3, 0.1), 0)
+		_star(p, Color(1.0, 0.85, 0.2), 0.6)
+		_sparks(p, d, 2, Color(1.0, 0.9, 0.5), 5.0)
+
+# One tick of the hydrant hose: three fat droplets flying out of the muzzle along `dir`.
+func water(dir: Vector3, speed: float) -> void:
+	if gun == null:
+		return
+	var from := gun.to_global(muzzle_local)
+	for i in 3:
+		var c := Color(0.45, 0.75, 1.0).lerp(Color(0.9, 0.97, 1.0), randf() * 0.6)
+		goo.emit(from + dir * (0.2 + i * 0.5), dir * speed * randf_range(0.45, 1.0) + _rv(0.9), _cube(randf_range(0.11, 0.18)), c,
+			randf_range(0.4, 0.55), 5.0, 0.3, 1.8, 0.45, randf_range(-6, 6))
+
+# Spray where the hose lands on something.
+func water_splash(pos: Vector3) -> void:
+	_puffs(pos, Vector3.UP, 2, Color(0.75, 0.9, 1.0), 2.0, 0.16)
+
+# One puff left behind by something flying (hot dog smoke, pigeon feathers, sauce drips).
+func trail(pos: Vector3, c: Color, size := 0.12) -> void:
+	goo.emit(pos, _rv(0.4), _cube(size), c, 0.4, -0.6, 2.0, 1.0, 0.7, randf_range(-4, 4))
+
+# A puff of flat feathers (a pigeon arrived).
+func feathers(pos: Vector3) -> void:
+	for i in 7:
+		var c := Color(0.9, 0.9, 0.95).darkened(randf() * 0.35)
+		lit.emit(pos + _rv(0.2), _rv(3.0) + Vector3(0, 2.0, 0), Basis.from_scale(Vector3(0.14, 0.02, 0.07)), c,
+			1.4, 4.0, 2.5, 0.0, 0.3, randf_range(-9, 9), 1)
+
+# A burning hot-sauce puddle of radius r: call a few times a second while it burns.
+# Costs 3 additive cubes and one soft ring on the ground per call.
+func fire_patch(pos: Vector3, r: float) -> void:
+	var fl := Pool.floor_y(pos)
+	for i in 3:
+		var a := randf() * TAU
+		var d := sqrt(randf()) * r
+		var p := Vector3(pos.x + cos(a) * d, fl + 0.1, pos.z + sin(a) * d)
+		var c := FIRE_COL.lerp(Color(1.0, 0.9, 0.3), randf() * 0.7)
+		add.emit(p, Vector3(0, randf_range(1.5, 3.0), 0), Basis.from_scale(Vector3(0.14, 0.3, 0.14)), c * 0.8,
+			randf_range(0.35, 0.6), -1.5, 0.5, -0.5, 0.8)
+	gring.emit(Vector3(pos.x, fl + 0.05, pos.z), Vector3.ZERO, Basis.from_scale(Vector3(r * 1.9, 1.0, r * 1.9)),
+		Color(0.5, 0.16, 0.03), 0.3, 0.0, 0.0, 0.08, 0.9)
+
+# Something was picked up at `pos`: a ring, a flash and sparks in colour c.
+func pickup(pos: Vector3, c: Color) -> void:
+	var p := pos + Vector3(0, 0.8, 0)
+	ring.emit(p, Vector3.ZERO, _cube(0.6), c, 0.35, 0.0, 0.0, 6.0, 0.7)
+	glow.emit(p, Vector3.ZERO, _cube(3.0), Color(c.r * 0.6, c.g * 0.6, c.b * 0.6), 0.25, 0.0, 0.0, 0.6, 1.0)
+	_ground_ring(pos, c, 1.0, 6.0, 0.4)
+	for i in 10:
+		add.emit(p + _rv(0.4), Vector3(randf_range(-1.5, 1.5), randf_range(3.0, 6.5), randf_range(-1.5, 1.5)),
+			Basis.from_scale(Vector3(0.05, 0.16, 0.05)), c.lerp(Color.WHITE, randf() * 0.4) * 0.85, randf_range(0.4, 0.75), 4.0, 1.0, 0.0, 0.6)
+	_pop(p, c, 3.0, 0.25, 9.0)
+	punch = maxf(punch, 0.35)
+
+# A crate hit the street at `pos`: dust, splinters, a thump you can feel if it is close.
+func crate_land(pos: Vector3, c: Color) -> void:
+	_puffs(pos + Vector3(0, 0.2, 0), Vector3.UP, 6, Color(0.55, 0.52, 0.5), 2.6, 0.24)
+	_ground_ring(pos, c, 1.2, 7.0, 0.35)
+	for i in 4:
+		lit.emit(pos + Vector3(0, 0.3, 0), _rv(3.0) + Vector3(0, 4.0, 0), _cube(randf_range(0.07, 0.12)),
+			Color(0.66, 0.42, 0.2).darkened(randf() * 0.3), 1.2, 18.0, 0.0, 0.0, 0.3, randf_range(-12, 12), 1)
+	var k := clampf(1.0 - pos.distance_to(cam.global_position) / 20.0, 0.0, 1.0)
+	trauma = minf(trauma + 0.35 * k, 0.7)
+
+# The marker of a drop: a puff of coloured smoke rising from `pos` and a slow ring on the ground.
+# Call a few times a second. Costs 1 puff, and a ground ring when `pulse` is true.
+func beacon(pos: Vector3, c: Color, pulse: bool) -> void:
+	goo.emit(pos + Vector3(randf_range(-0.2, 0.2), 0.3, randf_range(-0.2, 0.2)), Vector3(randf_range(-0.3, 0.3), randf_range(2.2, 3.2), randf_range(-0.3, 0.3)),
+		_cube(randf_range(0.22, 0.34)), c.darkened(randf() * 0.2), randf_range(1.3, 1.9), -0.3, 0.5, 1.6, 0.6, randf_range(-2, 2))
+	if pulse:
+		_ground_ring(pos, Color(c.r * 0.6, c.g * 0.6, c.b * 0.6), 1.0, 5.0, 0.7)

@@ -34,13 +34,13 @@ const C_WILD := Color(0.96, 0.27, 0.27)
 
 const POOL := [
 	# ---- tier 0: simple and always useful ----
-	{"id": "damage", "title": "ANGRY SHELLS", "desc": "+20% DAMAGE PER PELLET", "color": C_GUN, "icon": "shell",
+	{"id": "damage", "title": "ANGRY AMMO", "desc": "+20% DAMAGE, EVERY WEAPON", "color": C_GUN, "icon": "shell",
 		"max": 5, "tier": 0, "weight": 1.2, "mods": {"damage": ["mul", 1.2]}},
-	{"id": "pump", "title": "GREASED PUMP", "desc": "SHOOT 18% FASTER", "color": C_GUN, "icon": "clock",
+	{"id": "pump", "title": "GREASED PUMP", "desc": "EVERY WEAPON SHOOTS 18% FASTER", "color": C_GUN, "icon": "clock",
 		"max": 4, "tier": 0, "weight": 1.0, "mods": {"fire_cd": ["mul", 0.82]}},
 	{"id": "loader", "title": "SPEED LOADER", "desc": "RELOAD 25% FASTER", "color": C_AMMO, "icon": "clock",
 		"max": 4, "tier": 0, "weight": 1.0, "mods": {"reload_time": ["mul", 0.75]}},
-	{"id": "tube", "title": "LONGER TUBE", "desc": "+3 SHELLS BEFORE YOU RELOAD", "color": C_AMMO, "icon": "shell",
+	{"id": "tube", "title": "LONGER TUBE", "desc": "BIGGER MAGAZINES: +3 SHELLS (MORE IN BIG GUNS)", "color": C_AMMO, "icon": "shell",
 		"max": 4, "tier": 0, "weight": 1.0, "mods": {"max_ammo": ["add", 3.0]}},
 	{"id": "sneakers", "title": "FAST SNEAKERS", "desc": "RUN 11% FASTER. SQUEAKY.", "color": C_MOVE, "icon": "boot",
 		"max": 4, "tier": 0, "weight": 1.0, "mods": {"move_speed": ["add", 1.0]}},
@@ -49,7 +49,7 @@ const POOL := [
 	{"id": "snack", "title": "BIGGER SNACK", "desc": "+20 HEALTH BACK AFTER EVERY WAVE", "color": C_BODY, "icon": "heart",
 		"max": 3, "tier": 0, "weight": 1.0, "mods": {"wave_heal": ["add", 20.0]}},
 	# ---- tier 1: change how you play ----
-	{"id": "buckshot", "title": "EXTRA BUCKSHOT", "desc": "+2 PELLETS, BUT A WIDER SPREAD", "color": C_GUN, "icon": "shell",
+	{"id": "buckshot", "title": "EXTRA BUCKSHOT", "desc": "SHOTGUNS: +2 PELLETS, BUT A WIDER SPREAD", "color": C_GUN, "icon": "shell",
 		"max": 3, "tier": 1, "weight": 1.0, "mods": {"pellets": ["add", 2.0], "spread": ["mul", 1.18]}},
 	{"id": "choke", "title": "TIGHT CHOKE", "desc": "30% TIGHTER SPREAD, +8% DAMAGE", "color": C_GUN, "icon": "aim",
 		"max": 3, "tier": 1, "weight": 0.9, "mods": {"spread": ["mul", 0.7], "damage": ["mul", 1.08]}},
@@ -65,7 +65,7 @@ const POOL := [
 	{"id": "combo", "title": "COMBO BREAKFAST", "desc": "COMBOS LAST 1 SECOND LONGER", "color": C_SCORE, "icon": "star",
 		"max": 3, "tier": 1, "weight": 0.7, "mods": {"combo_time": ["add", 1.0]}},
 	# ---- tier 2: build-defining or risky ----
-	{"id": "boom", "title": "SPICY SHELLS", "desc": "EVERY SHOT EXPLODES A LITTLE", "color": C_WILD, "icon": "boom",
+	{"id": "boom", "title": "SPICY SHELLS", "desc": "BULLETS EXPLODE A LITTLE, BLASTS GROW", "color": C_WILD, "icon": "boom",
 		"max": 3, "tier": 2, "weight": 0.9, "first": {"explosive_radius": 1.1},
 		"mods": {"explosive_radius": ["add", 0.7]}},
 	{"id": "vampire", "title": "VAMPIRE BONKS", "desc": "HEADSHOT KILLS HEAL 3 HEALTH", "color": C_WILD, "icon": "skull",
@@ -74,6 +74,26 @@ const POOL := [
 		"max": 3, "tier": 2, "weight": 0.8, "mods": {"shove_damage": ["add", 40.0], "shove_cd": ["mul", 0.9]}},
 	{"id": "glass", "title": "GLASS CANNON", "desc": "+45% DAMAGE BUT -25 MAX HEALTH", "color": C_WILD, "icon": "boom",
 		"max": 2, "tier": 2, "weight": 0.7, "mods": {"damage": ["mul", 1.45], "max_hp": ["add", -25.0]}},
+	# ---- weapon and gadget cards ("needs": only offered while you carry one of these weapons) ----
+	{"id": "pockets", "title": "DEEP POCKETS", "desc": "FOUND WEAPONS CARRY 35% MORE SPARE AMMO", "color": C_AMMO, "icon": "shell",
+		"max": 3, "tier": 0, "weight": 1.0, "needs": ["revolver", "smg", "skewer", "double", "launcher", "hydrant", "pigeon"],
+		"mods": {"reserve_mult": ["add", 0.35]}},
+	{"id": "sauce", "title": "SAUCE SPONSOR", "desc": "HOT SAUCE IS READY 25% SOONER", "color": C_WILD, "icon": "boom",
+		"max": 3, "tier": 1, "weight": 0.9, "mods": {"throw_cd": ["mul", 0.75]}},
+	{"id": "mustard", "title": "EXTRA MUSTARD", "desc": "EVERY BLAST IS 20% WIDER", "color": C_WILD, "icon": "boom",
+		"max": 3, "tier": 1, "weight": 0.9, "mods": {"blast_mult": ["add", 0.2]}},
+	{"id": "hands", "title": "SMOOTH HANDS", "desc": "PERFECT RELOADS: EASIER, AND HIT 15% HARDER", "color": C_AMMO, "icon": "clock",
+		"max": 3, "tier": 1, "weight": 0.8, "mods": {"perfect_window": ["mul", 1.35], "perfect_bonus": ["add", 0.15]}},
+	{"id": "addict", "title": "BONK ADDICT", "desc": "THE BONK METER FILLS 30% FASTER", "color": C_SCORE, "icon": "star",
+		"max": 3, "tier": 1, "weight": 0.8, "mods": {"bonk_gain": ["add", 0.3]}},
+	{"id": "kebab", "title": "SHISH KEBAB", "desc": "KEBAB BOW SKEWERS 2 MORE ZOMBIES", "color": C_GUN, "icon": "aim",
+		"max": 2, "tier": 1, "weight": 1.2, "needs": ["skewer"], "mods": {"pierce": ["add", 2.0]}},
+	{"id": "iron", "title": "CAST IRON", "desc": "FRYING PAN: +35% DAMAGE, LONGER REACH", "color": C_SHOVE, "icon": "fist",
+		"max": 3, "tier": 1, "weight": 1.2, "needs": ["pan"], "mods": {"melee_mult": ["add", 0.35], "melee_reach": ["add", 0.4]}},
+	{"id": "pressure", "title": "WATER PRESSURE", "desc": "HYDRANT HOSE PUSHES 30% HARDER AND FURTHER", "color": C_MOVE, "icon": "bolt",
+		"max": 3, "tier": 1, "weight": 1.2, "needs": ["hydrant"], "mods": {"hose_force": ["mul", 1.3], "hose_reach": ["add", 2.0]}},
+	{"id": "flock", "title": "BIGGER FLOCK", "desc": "PIGEON POST SENDS TWO BIRDS PER SHOT", "color": C_GUN, "icon": "star",
+		"max": 1, "tier": 2, "weight": 1.2, "needs": ["pigeon"], "mods": {"flock": ["add", 1.0]}},
 ]
 
 # [min, max] after all upgrades.
@@ -85,17 +105,54 @@ const LIMITS := {
 	"shove_cd": [0.35, 5.0], "shove_reach": [1.0, 7.0], "shove_arc": [20.0, 160.0],
 	"shove_force": [1.0, 26.0], "shove_damage": [0.0, 200.0], "explosive_radius": [0.0, 4.0],
 	"score_mult": [0.1, 5.0], "combo_time": [0.5, 8.0],
+	# weapon and gadget stats (read by weapons.gd / drops.gd with their own base values)
+	"reserve_mult": [1.0, 3.0], "throw_cd": [3.0, 60.0], "blast_mult": [0.5, 2.0], "perfect_window": [0.02, 0.5],
+	"perfect_bonus": [0.0, 1.5], "bonk_gain": [0.2, 3.0], "pierce": [0.0, 12.0], "melee_mult": [0.5, 4.0],
+	"melee_reach": [1.0, 6.0], "hose_force": [1.0, 20.0], "hose_reach": [4.0, 24.0], "flock": [1.0, 3.0],
 }
 
 var levels := {}        # id -> level taken
 var picks := 0          # total cards taken this run
 var _add := {}          # stat -> summed additions   (rebuilt by take/reset, so stat() is cheap:
 var _mul := {}          # stat -> combined multiplier  main.gd calls it many times per frame)
+var _temp := {}         # key -> {stat: multiplier}: temporary boosts (airdrop power-ups, bonk frenzy)
+var _weapons: Array = []  # weapon ids the player carries (weapons.gd keeps this up to date)
 
 func reset() -> void:
 	levels.clear()
 	picks = 0
+	_temp.clear()
 	_rebuild()
+
+# A temporary multiplier on some stats (a power-up): set_temp("speed", {"move_speed": 1.35}).
+# Setting the same key again replaces it; clear_temp(key) removes it.
+func set_temp(key: String, mods: Dictionary) -> void:
+	_temp[key] = mods
+	_rebuild()
+
+func clear_temp(key: String) -> void:
+	if _temp.erase(key):
+		_rebuild()
+
+# Which weapons the player carries, so cards with "needs" are only offered when useful.
+func set_weapons(ids: Array) -> void:
+	_weapons = ids.duplicate()
+
+# The raw modifiers of a stat, for callers that do their own clamping (weapons.gd):
+# value = (base + add(name)) * mul(name).
+func add(name: String) -> float:
+	return _add.get(name, 0.0)
+
+func mul(name: String) -> float:
+	return _mul.get(name, 1.0)
+
+func _usable(c: Dictionary) -> bool:
+	if not c.has("needs"):
+		return true
+	for w in c.needs:
+		if _weapons.has(w):
+			return true
+	return false
 
 func level(id: String) -> int:
 	return levels.get(id, 0)
@@ -114,7 +171,7 @@ func roll(n: int, rng: RandomNumberGenerator) -> Array:
 	var open: Array = []     # unlocked cards
 	var locked: Array = []   # not unlocked yet: only used to fill the hand
 	for c in POOL:
-		if level(c.id) >= c.max:
+		if level(c.id) >= c.max or not _usable(c):
 			continue
 		if picks >= TIER_UNLOCK[c.tier]:
 			open.append(c)
@@ -163,6 +220,9 @@ func _rebuild() -> void:
 		# "first": a one-off amount for owning the card at all (level 1 has to be worth it)
 		for s in c.get("first", {}):
 			_add[s] = _add.get(s, 0.0) + c.first[s]
+	for k in _temp:   # temporary boosts multiply on top of the cards
+		for s in _temp[k]:
+			_mul[s] = _mul.get(s, 1.0) * float(_temp[k][s])
 
 # The value of a stat after all taken upgrades are applied.
 func stat(name: String, base: float) -> float:

@@ -18,9 +18,14 @@ extends Node
 #   does nothing until it is lifted and pressed again.
 #
 # Bindings: WASD/arrows move, mouse look, LMB fire, RMB or E shove, Space jump, Shift dash,
-# R reload, V view, F fullscreen, G resolution, M mute, [ ] sensitivity.
+# R reload (again during a reload: perfect-reload try), V view, F fullscreen, G resolution,
+# M mute, [ ] sensitivity, 1-3 weapon slot, Q or mouse wheel next/previous weapon,
+# T or middle mouse throw hot sauce, C swap for the weapon in a crate (when offered).
 # Gamepad: left stick move, right stick look, RT/RB fire, A jump, B/LB/L3 dash, X reload,
-# Y view, R3 (right stick click) shove, Back/Select resolution, d-pad left/right sensitivity.
+# Y view, R3 (right stick click) shove, Back/Select resolution, d-pad left/right sensitivity,
+# d-pad up next weapon, LT throw hot sauce, d-pad down swap.
+# Touch buttons (names in hud.BUTTON_NAMES): "weapon" next weapon, "throw", "grab" (only
+# shown while a swap is offered).
 
 signal dash            # dash requested
 signal reload          # reload requested
@@ -29,6 +34,11 @@ signal start_pressed   # tap / click / Enter while the game is not running (titl
 signal shove           # melee shove requested
 signal toggle_quality  # switch render resolution
 signal toggle_mute     # sound on/off (M)
+signal weapon_next     # switch to the next carried weapon
+signal weapon_prev     # ... the previous one
+signal weapon_slot(i: int)  # ... the one in slot i (0-based)
+signal throw           # throw the hot sauce
+signal grab            # confirm the weapon swap a crate is offering
 
 # Touch look: radians per full screen-width swipe at medium swipe speed, by SENS level 1..5.
 const SENS := [0.0, 1.1, 1.8, 2.6, 3.5, 4.6]
@@ -98,6 +108,7 @@ var _start_block := 0.0
 var _pad := -1                  # gamepad in use (-1 until one sends input)
 var _pad_fire := false
 var _pad_jump := false
+var _pad_throw := false         # left trigger is down (it throws once per pull)
 
 func _init() -> void:
 	process_priority = -100  # run before main.gd so it reads this frame's input, not last frame's
@@ -195,6 +206,10 @@ func _process(_scaled_dt: float) -> void:
 		if not trigger:
 			_pad_trigger_wait = false
 		pad_fire = _pad_fire or (trigger and not _pad_trigger_wait)
+		var lt := Input.get_joy_axis(_pad, JOY_AXIS_TRIGGER_LEFT) > 0.5
+		if lt and not _pad_throw and game_active:
+			throw.emit()
+		_pad_throw = lt
 	move = m.limit_length(1.0)
 
 	if _mouse_fire and Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
@@ -336,6 +351,9 @@ func _touch_down(index: int, p: Vector2) -> void:
 			"dash": dash.emit()
 			"shove": shove.emit()
 			"reload": reload.emit()
+			"weapon": weapon_next.emit()
+			"throw": throw.emit()
+			"grab": grab.emit()
 			"view": toggle_view.emit()
 			"sens": set_sens_level(sens_level % (SENS.size() - 1) + 1)
 	elif _stick_id == -1 and hud.stick_zone().has_point(p):
@@ -446,6 +464,14 @@ func _mouse_button(ev: InputEventMouseButton) -> void:
 				and Time.get_ticks_msec() - _last_touch_ms >= 700:
 			shove.emit()
 		return
+	if ev.button_index == MOUSE_BUTTON_WHEEL_UP or ev.button_index == MOUSE_BUTTON_WHEEL_DOWN \
+			or ev.button_index == MOUSE_BUTTON_MIDDLE:
+		if ev.pressed and game_active and Time.get_ticks_msec() - _last_touch_ms >= 700:
+			match ev.button_index:
+				MOUSE_BUTTON_WHEEL_UP: weapon_prev.emit()
+				MOUSE_BUTTON_WHEEL_DOWN: weapon_next.emit()
+				_: throw.emit()
+		return
 	if ev.button_index != MOUSE_BUTTON_LEFT:
 		return
 	if not ev.pressed:
@@ -479,6 +505,12 @@ func _key_down(key: int) -> void:
 		KEY_G: toggle_quality.emit()
 		KEY_M: toggle_mute.emit()
 		KEY_R: reload.emit()
+		KEY_Q: weapon_next.emit()
+		KEY_1, KEY_KP_1: weapon_slot.emit(0)
+		KEY_2, KEY_KP_2: weapon_slot.emit(1)
+		KEY_3, KEY_KP_3: weapon_slot.emit(2)
+		KEY_T: throw.emit()
+		KEY_C: grab.emit()
 		KEY_F: toggle_fullscreen()
 		KEY_SHIFT: dash.emit()
 		KEY_SPACE:
@@ -511,6 +543,8 @@ func _pad_button(button: int, pressed: bool) -> void:
 		JOY_BUTTON_START: _try_start()
 		JOY_BUTTON_DPAD_LEFT: _nudge_sens(-1)
 		JOY_BUTTON_DPAD_RIGHT: _nudge_sens(1)
+		JOY_BUTTON_DPAD_UP: weapon_next.emit()
+		JOY_BUTTON_DPAD_DOWN: grab.emit()
 
 # ---------------- settings ----------------
 

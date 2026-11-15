@@ -53,6 +53,30 @@ const CONF := {
 	"bloater_swell": [0.55, 200, 0.05, 0],
 	"explode": [0.97, 80, 0.05, 1],
 	"boss_step": [0.8, 150, 0.05, 0],
+	# weapons
+	"shoot_revolver": [0.9, 60, 0.0, 1],
+	"shoot_smg": [0.7, 40, 0.04, 1],
+	"shoot_bow": [0.7, 80, 0.03, 1],
+	"shoot_double": [1.0, 60, 0.0, 1],
+	"shoot_launcher": [0.85, 100, 0.03, 1],
+	"shoot_pigeon": [0.7, 80, 0.08, 1],
+	"hose": [0.5, 150, 0.06, 0],
+	"swing": [0.6, 120, 0.05, 0],
+	"pan_hit": [0.95, 100, 0.04, 1],
+	"reload_mag": [0.5, 100, 0.03, 0],
+	"switch": [0.4, 80, 0.04, 0],
+	"perfect": [0.6, 100, 0.0, 1],
+	"throw": [0.5, 100, 0.05, 0],
+	"glass": [0.7, 80, 0.06, 1],
+	"pigeon_pop": [0.8, 80, 0.08, 1],
+	"frenzy": [0.7, 500, 0.0, 1],
+	# drops
+	"crate_land": [0.8, 200, 0.04, 1],
+	"airdrop": [0.6, 500, 0.0, 1],
+	"pickup": [0.6, 150, 0.0, 1],
+	"powerup": [0.65, 200, 0.0, 1],
+	"heal": [0.55, 200, 0.0, 1],
+	"ammo": [0.55, 150, 0.0, 1],
 }
 
 # Built once and kept across scene reloads (a restart must not rebuild or re-register samples).
@@ -443,7 +467,178 @@ func _build_all() -> void:
 	_echo(b, 0.09, 0.25)
 	s["boss_step"] = [_wav(b, "boss_step")]
 
+	_build_weapon_sounds(s)
 	_cache["streams"] = s
+
+# The sounds of the found weapons, the gadgets and the drops. Kept short: every sample is
+# computed in script at start-up.
+func _build_weapon_sounds(s: Dictionary) -> void:
+	var b: PackedFloat32Array
+
+	b = _buf(0.36)  # revolver: a dry, hard crack with a ring to it
+	_noise(b, 0.0, 0.02, 1.0, 10000, 7000, 2000, 0.0005)
+	_noise(b, 0.0, 0.16, 0.9, 6000, 700, 0, 0.001, 4)
+	_tone(b, 0.0, 0.12, 300, 80, SIN, 0.9, 0.001)
+	_tone(b, 0.0, 0.2, 1900, 1500, TRI, 0.12, 0.001, 4)
+	_drive(b, 1.5)
+	_echo(b, 0.07, 0.22)
+	s["shoot_revolver"] = [_wav(b, "shoot_revolver")]
+
+	b = _buf(0.11)  # smg: a short clacky pop (it repeats eighteen times a second)
+	_noise(b, 0.0, 0.015, 1.0, 9000, 6000, 1800, 0.0005)
+	_noise(b, 0.0, 0.07, 0.8, 5000, 900, 0, 0.001, 4)
+	_tone(b, 0.0, 0.05, 240, 110, SQR, 0.5, 0.001, 2, 0.3)
+	_drive(b, 1.4)
+	s["shoot_smg"] = [_wav(b, "shoot_smg")]
+
+	b = _buf(0.3)  # crossbow: twang, thunk and a whistle
+	_tone(b, 0.0, 0.2, 210, 150, TRI, 0.8, 0.001, 2, 0.5, 38.0, 0.08)
+	_tone(b, 0.0, 0.05, 110, 60, SIN, 0.8, 0.001)
+	_noise(b, 0.0, 0.03, 0.6, 3000, 1200, 500)
+	_noise(b, 0.02, 0.25, 0.35, 2500, 6000, 1500, 0.02)
+	s["shoot_bow"] = [_wav(b, "shoot_bow")]
+
+	b = _buf(0.7)  # double barrel: the shotgun, lower and fatter
+	_noise(b, 0.0, 0.03, 1.0, 8000, 5000, 1200, 0.0005)
+	_noise(b, 0.0, 0.38, 1.0, 6000, 300, 0, 0.001, 4)
+	_noise(b, 0.0, 0.6, 0.55, 700, 120, 0, 0.002)
+	_tone(b, 0.0, 0.36, 130, 30, SIN, 1.3, 0.001)
+	_tone(b, 0.0, 0.14, 80, 40, SQR, 0.4, 0.001)
+	_drive(b, 2.0)
+	_echo(b, 0.1, 0.32)
+	s["shoot_double"] = [_wav(b, "shoot_double")]
+
+	b = _buf(0.4)  # launcher: a hollow "foomp" out of a tube
+	_tone(b, 0.0, 0.22, 240, 70, SIN, 1.0, 0.004)
+	_tone(b, 0.0, 0.1, 480, 180, TRI, 0.3, 0.002)
+	_noise(b, 0.0, 0.3, 0.6, 1400, 300, 0, 0.01)
+	_echo(b, 0.08, 0.2)
+	s["shoot_launcher"] = [_wav(b, "shoot_launcher")]
+
+	b = _buf(0.34)  # pigeon: an indignant coo and a flap
+	_tone(b, 0.0, 0.14, 520, 700, SIN, 0.7, 0.01, 0, 0.5, 30.0, 0.05)
+	_tone(b, 0.14, 0.16, 660, 480, SIN, 0.7, 0.01, 2, 0.5, 30.0, 0.05)
+	for k in 3:
+		_noise(b, 0.05 + k * 0.08, 0.05, 0.5, 1800, 600, 200, 0.01)
+	s["shoot_pigeon"] = [_wav(b, "shoot_pigeon")]
+
+	b = _buf(0.22)  # hose: a rush of water (retriggered while the trigger is held)
+	_noise(b, 0.0, 0.22, 1.0, 3200, 2400, 500, 0.03, 0)
+	_noise(b, 0.0, 0.22, 0.4, 700, 500, 0, 0.03, 0)
+	s["hose"] = [_wav(b, "hose")]
+
+	b = _buf(0.2)  # a heavy thing swung through the air
+	_noise(b, 0.0, 0.2, 1.0, 300, 2600, 120, 0.06)
+	_tone(b, 0.0, 0.18, 120, 300, SAW, 0.1, 0.05)
+	s["swing"] = [_wav(b, "swing")]
+
+	b = _buf(0.5)  # frying pan on a skull: clang with a wobble
+	_tone(b, 0.0, 0.45, 880, 860, SIN, 0.8, 0.001, 2, 0.5, 11.0, 0.02)
+	_tone(b, 0.0, 0.35, 1320, 1290, TRI, 0.4, 0.001, 4)
+	_tone(b, 0.0, 0.25, 2210, 2180, SIN, 0.25, 0.001, 4)
+	_tone(b, 0.0, 0.08, 220, 90, SIN, 0.9, 0.001)
+	_noise(b, 0.0, 0.02, 0.8, 6000, 3000, 1000)
+	s["pan_hit"] = [_wav(b, "pan_hit")]
+
+	b = _buf(0.36)  # magazine out, magazine in, slap
+	_noise(b, 0.0, 0.04, 0.8, 3500, 1500, 700)
+	_tone(b, 0.0, 0.04, 500, 360, SQR, 0.3, 0.001, 2, 0.3)
+	_noise(b, 0.16, 0.04, 0.9, 4500, 2000, 900)
+	_tone(b, 0.16, 0.05, 640, 760, SQR, 0.3, 0.001, 2, 0.3)
+	_noise(b, 0.27, 0.04, 0.7, 2500, 900, 300)
+	_tone(b, 0.27, 0.08, 190, 100, SIN, 0.6)
+	s["reload_mag"] = [_wav(b, "reload_mag")]
+
+	b = _buf(0.14)  # weapon switch: cloth and a click
+	_noise(b, 0.0, 0.1, 0.7, 900, 2600, 300, 0.03)
+	_noise(b, 0.09, 0.03, 0.8, 5000, 2500, 1200)
+	_tone(b, 0.09, 0.04, 900, 700, SQR, 0.25, 0.001, 2, 0.3)
+	s["switch"] = [_wav(b, "switch")]
+
+	b = _buf(0.3)  # perfect reload: a bright ding-ding
+	_tone(b, 0.0, 0.1, 1320, 1320, SIN, 0.7, 0.001, 4)
+	_tone(b, 0.07, 0.22, 1980, 1980, SIN, 0.7, 0.001, 4)
+	_tone(b, 0.07, 0.22, 3960, 3960, TRI, 0.15, 0.001, 4)
+	s["perfect"] = [_wav(b, "perfect")]
+
+	b = _buf(0.22)  # throw: a grunt of effort and a whoosh
+	_noise(b, 0.0, 0.2, 1.0, 400, 3200, 150, 0.05)
+	_tone(b, 0.0, 0.1, 160, 110, SAW, 0.25, 0.01)
+	s["throw"] = [_wav(b, "throw")]
+
+	b = _buf(0.4)  # bottle smashing
+	_noise(b, 0.0, 0.05, 1.0, 12000, 8000, 3000, 0.0005)
+	for k in 6:
+		var f := 2400.0 + ((k * 977) % 2600)
+		_tone(b, 0.01 + k * 0.035, 0.12, f, f * 0.97, SIN, 0.3, 0.001, 4)
+	_noise(b, 0.03, 0.3, 0.4, 9000, 5000, 3500, 0.01)
+	s["glass"] = [_wav(b, "glass")]
+
+	b = _buf(0.5)  # a pigeon arrives: small pop, squawk
+	_noise(b, 0.0, 0.25, 1.0, 5000, 400, 0, 0.001, 4)
+	_tone(b, 0.0, 0.2, 150, 50, SIN, 1.0, 0.001)
+	_tone(b, 0.04, 0.2, 900, 500, SAW, 0.3, 0.005, 2, 0.5, 45.0, 0.1)
+	_drive(b, 1.4)
+	_echo(b, 0.09, 0.25)
+	s["pigeon_pop"] = [_wav(b, "pigeon_pop")]
+
+	b = _buf(0.9)  # bonk frenzy: a fast rising fanfare
+	var fr := [0, 4, 7, 12, 7, 12, 16]
+	for i in 7:
+		var f := 523.3 * pow(2.0, fr[i] / 12.0)
+		var last := i == 6
+		_tone(b, i * 0.07, 0.4 if last else 0.075, f, f, SQR, 0.5, 0.002, 2 if last else 1, 0.25)
+		_tone(b, i * 0.07, 0.4 if last else 0.075, f * 2.0, f * 2.0, TRI, 0.2, 0.002)
+	_echo(b, 0.1, 0.3)
+	s["frenzy"] = [_wav(b, "frenzy")]
+
+	b = _buf(0.5)  # crate hits the street
+	_tone(b, 0.0, 0.3, 95, 35, SIN, 1.2, 0.001)
+	_noise(b, 0.0, 0.2, 1.0, 2500, 250)
+	_noise(b, 0.06, 0.12, 0.5, 5000, 1500, 800)   # planks rattle
+	_tone(b, 0.0, 0.07, 240, 120, SQR, 0.4, 0.001)
+	_drive(b, 1.5)
+	_echo(b, 0.09, 0.25)
+	s["crate_land"] = [_wav(b, "crate_land")]
+
+	b = _buf(0.9)  # airdrop incoming: a two-tone radio call, twice
+	for k in 2:
+		_tone(b, k * 0.42, 0.14, 880, 880, SQR, 0.5, 0.004, 0, 0.25)
+		_tone(b, k * 0.42 + 0.15, 0.2, 1174.7, 1174.7, SQR, 0.5, 0.004, 1, 0.25)
+		_noise(b, k * 0.42, 0.36, 0.12, 5000, 4000, 2500, 0.01, 0)
+	_crush(b, 2, 32.0)
+	_echo(b, 0.12, 0.25)
+	s["airdrop"] = [_wav(b, "airdrop")]
+
+	b = _buf(0.55)  # picking up a weapon: chunky click, then a proud little rise
+	_noise(b, 0.0, 0.04, 0.9, 4000, 1500, 600)
+	_tone(b, 0.0, 0.07, 180, 110, SIN, 0.7)
+	var pk := [392.0, 523.3, 659.3, 784.0]
+	for i in 4:
+		_tone(b, 0.07 + i * 0.06, 0.25 if i == 3 else 0.07, pk[i], pk[i], SQR, 0.45, 0.002, 2 if i == 3 else 1, 0.25)
+	_echo(b, 0.1, 0.25)
+	s["pickup"] = [_wav(b, "pickup")]
+
+	b = _buf(0.6)  # power-up: a rising sweep with sparkle
+	_tone(b, 0.0, 0.4, 220, 1760, SAW, 0.4, 0.01, 1)
+	_tone(b, 0.0, 0.4, 440, 3520, TRI, 0.3, 0.01, 1)
+	_tone(b, 0.34, 0.24, 1760, 1760, SIN, 0.5, 0.003, 2, 0.5, 12.0, 0.02)
+	_echo(b, 0.08, 0.3)
+	s["powerup"] = [_wav(b, "powerup")]
+
+	b = _buf(0.45)  # health: two soft rising notes
+	_tone(b, 0.0, 0.16, 523.3, 523.3, SIN, 0.7, 0.01)
+	_tone(b, 0.0, 0.16, 1046.5, 1046.5, TRI, 0.2, 0.01)
+	_tone(b, 0.14, 0.3, 784.0, 784.0, SIN, 0.7, 0.01)
+	_tone(b, 0.14, 0.3, 1568.0, 1568.0, TRI, 0.2, 0.01)
+	s["heal"] = [_wav(b, "heal")]
+
+	b = _buf(0.34)  # ammo: shells rattling into a pocket
+	for k in 4:
+		_noise(b, k * 0.06, 0.04, 0.8, 5000, 2200, 1200)
+		_tone(b, k * 0.06, 0.05, 700.0 + k * 130.0, 600.0 + k * 130.0, SQR, 0.25, 0.001, 2, 0.3)
+	_tone(b, 0.24, 0.09, 200, 120, SIN, 0.5)
+	s["ammo"] = [_wav(b, "ammo")]
 
 # Two 16 s loops at 120 bpm in A minor (Am, F, Dm, E; two bars each). Both begin and end in
 # silence. Layer A is always heard; layer B fades in with set_intensity.

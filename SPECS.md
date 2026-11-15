@@ -81,29 +81,67 @@ may be relied on by other files, so **signatures and meanings below must not cha
 - Unknown names are ignored silently. Frozen names: `shoot pump reload empty dash jump land hurt death_player
   hit headshot kill shove wave_start wave_clear upgrade_pick ui_click zombie_spawn zombie_groan zombie_windup
   zombie_attack bloater_swell explode boss_step`.
+- Weapon / drop names (frozen too): `shoot_revolver shoot_smg shoot_bow shoot_double shoot_launcher shoot_pigeon hose swing
+  pan_hit reload_mag switch perfect throw glass pigeon_pop frenzy crate_land airdrop pickup powerup heal ammo`
+  (played by weapons.gd and drops.gd).
 - Called by: main (player and scoring sounds), zombies.gd (`zombie_*`, `bloater_swell`, `explode`, `boss_step` via `play_at`),
   hud.gd (`ui_click`).
 
 ## weapons.gd (extends Node)
 - `setup(main)`; `update(dt)` — main calls it every frame while playing (not during the upgrade draft). It reads
-  `main.controls.fire`, fires, reloads, animates the gun model and calls `main.zombies.hit(...)`, `main.fx`, `main.sfx`.
-- Vars: `current: String` (weapon id), `owned: Array` of ids, `ammo: int` (in the current weapon), `reloading: float`, `gun: Node3D`.
+  `main.controls.fire`, fires, reloads, moves projectiles and burning puddles, animates the gun model and calls
+  `main.zombies.hit / shove / damage_radius`, `main.fx`, `main.sfx`. It connects itself to `main.controls`
+  (`weapon_next`, `weapon_prev`, `weapon_slot`, `throw`) and `main.zombies.zombie_killed` on its first `update`.
+- Vars: `current: String` (weapon id), `owned: Array` of ids (max `SLOTS` = 3, slot 1 is always the starter `shotgun`),
+  `ammo: int` (magazine of the current weapon), `reloading: float`, `gun: Node3D` (holder of all first-person models, child of
+  the camera; only the current model is visible), `mags` / `reserves` (id -> rounds; reserve -1 = endless),
+  `bonk` (meter 0..1), `frenzy_t`, `throw_t`, `juiced`.
 - `max_ammo() -> int`, `reload_frac() -> float`, `hud_info() -> Dictionary` (`id, name, ammo, max_ammo, reserve` (-1 = infinite),
-  `slots, reloading, reload_frac`), `give(id, rounds := -1)`, `has(id)`, `switch_to(id)`, `next()`, `refill()`,
-  `start_reload()`, `set_view_visible(on)`.
+  `slots, reloading, reload_frac` plus `color, icon, melee, slot_info [{id, name, color, icon, ammo, reserve, melee}],
+  perfect_lo, perfect_hi, perfect (0 unused / 1 hit / 2 fumbled), perfect_t, juiced, bonk, frenzy (1..0), throw_ready (0..1), free_ammo`),
+  `give(id, rounds := -1)`, `has(id)`, `can_take(id)`, `replace_target()`, `add_reserve(id, rounds)`, `add_ammo(frac) -> bool`,
+  `switch_to(id)`, `next()`, `prev()`, `switch_slot(i)`, `refill()`, `start_reload()` (called again during a reload = the
+  perfect-reload try), `throw_sauce()`, `set_view_visible(on)`, `free_ammo()`, `damage_mult()`,
+  per-weapon numbers after upgrades: `damage_of(id)`, `cooldown_of(id)`, `reload_time_of(id)`, `max_ammo_of(id)`, `reserve_cap(id)`.
 - Signals: `fired(id)`, `weapon_changed(id)`, `picked_up(id)`.
-- Upgrade stats apply on top of each weapon's own base numbers: `main.upgrades.stat(name, weapon_base_value)`.
+- The table `W` (id -> name, mode, numbers, sounds, HUD colour/icon, first crate wave, weight; defaults in `DEFAULTS`).
+  Ids (frozen): `shotgun` BOOMSTICK (starter, endless ammo), `revolver` SNUB NOSE, `smg` RAT-A-TAT, `skewer` KEBAB BOW (pierces),
+  `double` DOUBLE TROUBLE, `launcher` HOT DOG CANNON (arcing blast), `pigeon` PIGEON POST (homing), `hydrant` HYDRANT HOSE
+  (pushes), `pan` FRYING PAN (melee). Modes: `shot` (ray casts), `proj` (pooled projectile, moved by hand), `stream`, `melee`.
+- Upgrade stats apply on top of each weapon's own base numbers through `main.upgrades` (`stat(name, weapon_base)`, or
+  `add(name)` / `mul(name)` where the weapon clamps for itself): damage, fire_cd, reload_time and max_ammo (in proportion)
+  on every weapon; pellets only on shotguns; spread / head_mult / explosive_radius on ray-cast weapons.
+- Other mechanics that live here: perfect reload (press reload again inside the window: instant finish, +30% damage for that
+  magazine; outside it: +0.3 s), hot sauce (thrown bottle on a 12 s cooldown: blast, then a burning puddle), bonk meter (kills
+  fill it; full = 7 s frenzy: fire rate x1.67, free ammo, +25% damage, quicker shove and dash).
 - Hit detection: ray casts against `Area3D` hit boxes carrying meta `"zombie"` and `"head"`; anything else is scenery.
+- Weapon view models, projectile meshes and the crate / parachute meshes are built in `gun_models.gd`
+  (`GunModels.make(id) -> Node3D` with children `Muzzle` and optionally `Part`; `GunModels.prop(kind) -> ArrayMesh`).
 
 ## drops.gd (extends Node3D)
 - `setup(main)`, `update(dt)` (every frame while playing), `clear()`.
-- Decides when crates/airdrops appear (listen to `main.wave_started` / `main.wave_ended`), where they land (a free street
-  spot near the player: `L.clamp_to_streets(p, margin)` and `not main.nav.is_blocked(p)`), and what they give
-  (`main.weapons.give(id)`, ammo, health via `main.hp`, temporary power-ups).
+- Wave reward: on `main.wave_ended` a weapon crate lands 5-10 m from the player (in front if possible) and stays until taken
+  or replaced by the next reward. Airdrops: during a wave (first after 10-18 s, then every 30-50 s, not while 3 or fewer zombies
+  are left) a parachute crate lands 14-34 m away and waits 28 s. Contents: ammo, health (+40), a power-up, or a weapon.
+- Placement uses only `L.clamp_to_streets(p, 2.0)` and `not main.nav.is_blocked(p)` (plus a physics ray straight down for the
+  ground height). Three drop objects exist for the whole game; nothing is created during play.
+- Walking into a crate takes it. A weapon the player cannot hold (every slot full) is offered instead: `prompt()` is non-empty
+  and `main.controls.grab` confirms the swap.
+- For other scripts: `power(id) -> bool` (ids `damage` x2 damage 12 s, `ammo` nothing uses ammo 10 s, `speed` x1.35 move 12 s),
+  `give_power(id)`, `powerups() -> [{id, name, color, left, frac}]`,
+  `markers() -> [{pos, kind ("crate" | "airdrop"), label, color, left (-1 = stays), falling}]`, `prompt() -> {text, color} | {}`,
+  `roll_weapon(wave, avoid := "") -> id`, `find_spot(min_d, max_d, toward := Vector3.ZERO, tries := 24) -> Vector3 | null`.
+- Power-ups that change `main.stat` values do it through `main.upgrades.set_temp` / `clear_temp`.
 
 ## upgrades.gd (extends RefCounted)
 - `reset()`, `roll(n: int, rng) -> [{id, title, desc, color}]` (empty = no draft), `take(id)`, `level(id) -> int`,
   `stat(name: String, base: float) -> float` for the stat names listed under main.gd.
+- `add(name)` / `mul(name)`: the raw modifiers (value = (base + add) * mul) for callers that clamp for themselves.
+- `set_temp(key, {stat: multiplier})` / `clear_temp(key)`: temporary boosts (power-ups, bonk frenzy) that also reach `main.stat`.
+- `set_weapons(ids)`: weapons.gd reports what is carried; cards with `"needs": [weapon ids]` are only offered then.
+- Extra stat names read by weapons.gd with their own base values: `reserve_mult` (1), `throw_cd` (12), `blast_mult` (1),
+  `perfect_window` (0.09), `perfect_bonus` (0.3), `bonk_gain` (1), `pierce` (0), `melee_mult` (1), `melee_reach`, `hose_force`,
+  `hose_reach`, `flock` (1). 27 cards in total.
 
 ## hud.gd (extends CanvasLayer)
 - Existing: `build`, `set_touch_mode`, `button_rect(name) -> Rect2` (real viewport rect), `button_active(name)`,
@@ -116,11 +154,21 @@ may be relied on by other files, so **signatures and meanings below must not cha
 - `BUTTON_NAMES` gains `"shove"` (touch action button) and `"res"` (small top-right button, shown on desktop too).
 - Must look right at viewport heights 360 and 540 (everything is scaled by `min(width / 640, height / 360)`).
 - Upgrade card dictionaries also carry `icon`, `level` and `max` for the draft screen.
+- `update_stats` also takes `weapon` (= `weapons.hud_info()`): weapon panel bottom-centre (slots, magazine as rounds or a bar,
+  spare ammo), perfect-reload window on the reload ring, hot sauce and bonk meter bars under the shove bar.
+- `toast(text, color := PAPER, big := false)`: a short message under the combo ("NEW WEAPON: ...", "AIRDROP INCOMING!").
+- Reads `get_parent().drops` each frame (guarded): `markers()` (tag over a visible drop, edge arrow + distance otherwise),
+  `powerups()` (timers top-right), `prompt()` (the swap offer).
+- `BUTTON_NAMES` gains `"weapon"` (next weapon), `"throw"` (hot sauce) and `"grab"` (swap; `button_active("grab")` is true
+  only in touch mode while a swap is offered). Weapon icons are `w_<id>`.
 
 ## controls.gd (extends Node)
 - Vars `game_active` (set by main), `touch_mode`, `move`, `fire`, `jump`, `sens_level`; `setup(hud)`, `take_look()`,
   `toggle_fullscreen()`, `set_sens_level()`.
-- Signals: `dash`, `reload`, `toggle_view`, `start_pressed`, `shove`, `toggle_quality`, `toggle_mute`.
+- Signals: `dash`, `reload`, `toggle_view`, `start_pressed`, `shove`, `toggle_quality`, `toggle_mute`,
+  `weapon_next`, `weapon_prev`, `weapon_slot(i)` (0-based), `throw`, `grab`.
+- Weapon bindings: keys 1-3 slot, Q next, mouse wheel previous / next, T or middle mouse throw, C swap; touch buttons
+  `weapon`, `throw`, `grab`; gamepad d-pad up next weapon, LT throw, d-pad down swap.
 - While `hud.modal_open()` is true, controls emits nothing and leaves all input to the HUD.
 - Never use `InputEventScreenDrag.relative`/`screen_relative` (Godot web bug #94346) — track positions per touch index.
 
@@ -131,6 +179,12 @@ may be relied on by other files, so **signatures and meanings below must not cha
 - New: `on_shove(hit_count: int)`, `explosion(pos, radius)`, `explosion_colored(pos, radius, toxic)`, `on_upgrade()`,
   `hit_stop(seconds)`, vars `shake_scale := 1.0`, `hit_stop_enabled`.
 - fx writes `cam.rotation` and `cam.fov`; nothing else may.
+- Weapons: `attach_gun(holder)` (weapons.gd passes one holder node; fx moves only its x / y / yaw / roll), `set_muzzle(local)`,
+  `on_fire(kick, flash_k, tracer_col, tracer_w, shell_col)` then `impact` / `zombie_hit` draw tracers until `end_shot()`,
+  `tracer_to(pos)`, `on_swing(hits)`, `water(dir, speed)`, `water_splash(pos)`, `trail(pos, col, size)`, `feathers(pos)`,
+  `fire_patch(pos, r)`, `power_burst(col)`. `on_shoot()` still works (the old shotgun call).
+- Drops: `pickup(pos, col)`, `crate_land(pos, col)`, `beacon(pos, col, pulse)`, `additive_material()` (shared, for drop beams).
+- `set_street_lights(positions)` / `set_subway_globes(positions)` replace the whole set (for the streamed city).
 
 ## Testing (Godot binary path is given in each task brief as `G`)
 - Script check: `timeout 60 $G --headless --quit-after 300 -- --autostart 2>&1 | grep -iE "script error|parse error" -A3`

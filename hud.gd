@@ -19,12 +19,14 @@ extends CanvasLayer
 # Structure: full-screen Controls stacked in this CanvasLayer, each painted by one
 # function (no per-frame node creation):
 #   vignette  - red screen-edge flash when hurt / low on health
-#   game      - health, dash, shove, wave, score, combo, ammo, crosshair, floating "+100"s
+#   game      - health, dash, shove, hot sauce, bonk meter, wave, score, combo, the weapon
+#               panel (slots, magazine, spare ammo), power-up timers, pickup toasts, drop
+#               markers, crosshair, floating "+100"s
 #   overlay   - title screen, game-over screen, wave banner, centred messages
 #   pad       - joystick and buttons
 #   draft     - the between-wave upgrade cards (handles its own input while open)
 
-const BUTTON_NAMES := ["fire", "jump", "dash", "reload", "view", "sens", "full", "shove", "res"]
+const BUTTON_NAMES := ["fire", "jump", "dash", "reload", "view", "sens", "full", "shove", "res", "weapon", "throw", "grab"]
 
 # ---- palette ----
 const INK := Color(0.07, 0.06, 0.12)
@@ -40,6 +42,9 @@ const PINK := Color(1.0, 0.45, 0.8)
 const CLEAR := Color(0, 0, 0, 0)
 
 const WAVE_BANNER_TIME := 2.4
+const TOAST_TIME := 2.8
+const VIOLET := Color(0.72, 0.56, 1.0)
+const SAUCE := Color(1.0, 0.42, 0.2)
 const DRAFT_GUARD := 0.4   # seconds the draft ignores input after it opens
 const DRAFT_OUT := 0.25    # closing animation
 const CARD_W := 176.0
@@ -89,6 +94,19 @@ const ICON_STAR := ["...#...", "...#...", "#######", ".#####.", "..###..", ".##.
 const ICON_BOOM := ["#..#..#", ".#.#.#.", "..###..", "#######", "..###..", ".#.#.#.", "#..#..#"]
 const ICON_ZOMBIE := ["hhhhhhhhhh", "hhhhhhhhhh", "gggggggggg", "gyyggggyyg", "gykggggkyg", "gggggggggg",
 	"ggggddgggg", "gggggggggg", "grrrrrrrrg", "grwrwrrwrg", "gggggggggg", ".dddddddd."]
+
+# Weapon silhouettes for the weapon panel (drawn in the weapon's colour).
+const ICON_WEAPONS := {
+	"w_shotgun": [".............", "##########...", "#############", "..####..#####", "..........###", "............."],
+	"w_revolver": [".............", "..######.....", "..#######....", "....#####....", "......###....", "......###...."],
+	"w_smg": [".............", ".#########...", "############.", "..###.##.###.", "..###.##.....", "..###........"],
+	"w_skewer": ["..#......#...", "...#....###..", "#############", "...#....###..", "..#......#...", "............."],
+	"w_double": [".............", "########.....", "############.", "########.###.", "..........##.", "............."],
+	"w_launcher": [".............", ".#########...", "###########..", "###########..", ".####.###....", "......###...."],
+	"w_pigeon": ["....##.......", "...####.#....", "..########...", ".#######.....", "...####......", "....#.#......"],
+	"w_hydrant": ["....###......", "...#####.....", ".#########...", "...#####.....", "...#####.....", "..#######...."],
+	"w_pan": ["..####.......", ".######......", ".###########.", ".######......", "..####.......", "............."],
+}
 
 enum { SCREEN_NONE, SCREEN_TITLE, SCREEN_OVER }
 
@@ -165,6 +183,18 @@ var kill_t := 0.0
 var floaters := []     # fixed pool of {t, text, head, x}
 var floater_next := 0
 
+# weapons, gadgets and drops
+var winfo := {}        # weapons.hud_info(): the "weapon" key of update_stats
+var throw_ready := 1.0
+var throw_flash := 0.0
+var bonk := 0.0
+var frenzy := 0.0
+var toasts := []       # fixed pool of {t, text, color, big}; oldest first
+var pad_key := ""
+var prompt := {}       # drops.prompt(): a weapon swap on offer, or {}
+var markers: Array = []
+var powers: Array = []
+
 # run summary for the game-over screen
 var kills := 0
 var headshots := 0
@@ -199,6 +229,9 @@ func build() -> void:
 	var icons := {"heart": ICON_HEART, "bolt": ICON_BOLT, "up": ICON_UP, "zombie": ICON_ZOMBIE,
 		"shell": ICON_SHELL, "clock": ICON_CLOCK, "boot": ICON_BOOT, "aim": ICON_AIM, "skull": ICON_SKULL,
 		"fist": ICON_FIST, "star": ICON_STAR, "boom": ICON_BOOM}
+	icons.merge(ICON_WEAPONS)
+	for i in 3:
+		toasts.append({"t": 0.0, "text": "", "color": PAPER, "big": false})
 	for n in icons:
 		var img := _bitmap(icons[n], ICON_COLORS)
 		# even sizes, so the 1.5x copy is a whole number of pixels
@@ -265,6 +298,9 @@ func _layout() -> void:
 	rects["dash"] = Rect2(vs.x - 148, vs.y - 126, 52, 52)
 	rects["reload"] = Rect2(vs.x - 78, vs.y - 154, 48, 48)
 	rects["shove"] = Rect2(vs.x - 218, vs.y - 62, 52, 52)
+	rects["weapon"] = Rect2(vs.x - 134, vs.y - 180, 48, 48)
+	rects["throw"] = Rect2(vs.x - 206, vs.y - 120, 48, 48)
+	rects["grab"] = Rect2(floor(vs.x * 0.5) - 42, vs.y - 124, 84, 44)   # only while a swap is offered
 	stick_home = Vector2(88, vs.y - 84)
 	if not stick_active:
 		stick_center = stick_home
@@ -481,6 +517,11 @@ func _process(dt: float) -> void:
 	hp_flash = max(hp_flash - dt * 3.0, 0.0)
 	dash_flash = max(dash_flash - dt * 4.0, 0.0)
 	shove_flash = max(shove_flash - dt * 4.0, 0.0)
+	throw_flash = max(throw_flash - dt * 4.0, 0.0)
+	for t in toasts:
+		if t.t > 0.0:
+			t.t -= dt
+	_read_drops()
 	cross_kick = max(cross_kick - dt * 7.0, 0.0)
 	hit_t = max(hit_t - dt, 0.0)
 	kill_t = max(kill_t - dt, 0.0)
@@ -511,7 +552,8 @@ func _process(dt: float) -> void:
 	overlay.visible = screen != SCREEN_NONE or banner_t > 0.0 or not msg_lines.is_empty()
 	if overlay.visible:
 		overlay.queue_redraw()
-	if dash_ready < 1.0 or dash_flash > 0.0 or shove_ready < 1.0 or shove_flash > 0.0:
+	if dash_ready < 1.0 or dash_flash > 0.0 or shove_ready < 1.0 or shove_flash > 0.0 \
+			or throw_ready < 1.0 or throw_flash > 0.0 or not prompt.is_empty():
 		pad.queue_redraw()
 	if get_viewport().get_visible_rect().size != real:
 		_layout()   # belt and braces: the resolution toggle should also emit size_changed
@@ -582,8 +624,27 @@ func _draw_game() -> void:
 	if sready:
 		_text(g, "SHOVE", Vector2(102, 36), 1, scol)
 
+	# --- hot sauce cooldown and the bonk meter, under the shove bar ---
+	var tready := throw_ready >= 1.0
+	var tcol := SAUCE.lerp(Color.WHITE, throw_flash) if tready else Color(0.6, 0.6, 0.66)
+	_icon_at(g, "boom", Vector2(29, 45), 1, tcol)
+	var tbar := Rect2(40, 48, 58, 6)
+	_r(g, tbar, INK)
+	_r(g, Rect2(tbar.position + Vector2(1, 1), Vector2(round((tbar.size.x - 2) * throw_ready), tbar.size.y - 2)), tcol)
+	if tready:
+		_text(g, "SAUCE", Vector2(102, 47), 1, tcol)
+	var fr := frenzy > 0.0
+	var bcol := PINK
+	if fr:
+		bcol = YELLOW if fmod(time, 0.16) < 0.08 else PINK
+	_icon_at(g, "star", Vector2(29, 56), 1, bcol)
+	var bbar := Rect2(40, 59, 58, 6)
+	_r(g, bbar, INK)
+	_r(g, Rect2(bbar.position + Vector2(1, 1), Vector2(round((bbar.size.x - 2) * (frenzy if fr else bonk)), bbar.size.y - 2)), bcol)
+	_text(g, "FRENZY!" if fr else "BONK", Vector2(102, 58), 1, bcol if fr else _a(PINK, 0.8))
+
 	# --- upgrades taken so far: one small icon each (a digit when stacked) ---
-	var up := Vector2(8, 48)
+	var up := Vector2(8, 70)
 	for u in taken:
 		_icon_at(g, u.icon, up, 1, u.color)
 		up.x += 12
@@ -628,53 +689,291 @@ func _draw_game() -> void:
 			_r(g, Rect2(cx - 31, 61, 62, 4), _a(INK, 0.8))
 			_r(g, Rect2(cx - bw * 0.5, 62, bw, 2), ccol)
 
-	# --- ammo, bottom-centre ---
-	var sw := 8.0
-	var total := max_ammo * sw - 2.0
-	var ax: float = floor(cx - total * 0.5)
-	var ay: float = vs.y - 24
-	var filled := float(ammo)
-	if reloading:
-		filled = max_ammo * reload_frac
-	_box(g, Rect2(ax - 5, ay - 4, total + 10, 22), _a(INK, 0.55), _a(INK, 0.9))
-	for i in max_ammo:
-		var x := ax + i * sw
-		if i < int(filled):
-			var hop := 0.0
-			if reloading and i == int(filled) - 1:
-				hop = -2.0
-			_r(g, Rect2(x + 1, ay + hop, 4, 1), RED)
-			_r(g, Rect2(x, ay + 1 + hop, 6, 9), RED)
-			_r(g, Rect2(x + 1, ay + 1 + hop, 1, 9), RED.lightened(0.45))
-			_r(g, Rect2(x, ay + 10 + hop, 6, 4), YELLOW)
-			_r(g, Rect2(x, ay + 12 + hop, 6, 1), ORANGE)
-		else:
-			_r(g, Rect2(x, ay + 1, 6, 13), Color(1, 1, 1, 0.13))
-	if reloading:
-		if _blink(0.3):
-			_text(g, "RELOADING", Vector2(cx, ay - 15), 1, YELLOW, 1)
-	elif ammo == 0:
-		if _blink(0.4):
-			_text(g, "EMPTY! RELOAD" if touch_mode else "EMPTY! PRESS R", Vector2(cx, ay - 15), 1, RED, 1)
-	elif ammo <= 2 and _blink(0.6):
-		_text(g, "LOW AMMO", Vector2(cx, ay - 15), 1, ORANGE, 1)
+	_draw_weapon(g, cx)
+	_draw_powers(g)
+	_draw_toasts(g, cx)
+	_draw_markers(g)
 
 	# --- desktop reminder of the keys, fades out after a while ---
 	if not touch_mode and play_time < 14.0:
 		var ka: float = clamp(14.0 - play_time, 0.0, 1.0) * 0.9
+		_text(g, "1-3 / Q / WHEEL  WEAPON", Vector2(8, vs.y - 62), 1, _a(PAPER, ka))
+		_text(g, "T HOT SAUCE  R R PERFECT RELOAD", Vector2(8, vs.y - 50), 1, _a(PAPER, ka))
 		_text(g, "SHIFT DASH  SPACE JUMP", Vector2(8, vs.y - 38), 1, _a(PAPER, ka))
 		_text(g, "E SHOVE  R RELOAD", Vector2(8, vs.y - 26), 1, _a(PAPER, ka))
 		_text(g, "V VIEW  G RESOLUTION", Vector2(8, vs.y - 14), 1, _a(PAPER, ka))
 
 	_draw_crosshair(g)
 
+# ------------------------------------------------------------------ weapons, drops
+
+# Slots, magazine and spare ammo, bottom-centre.
+func _draw_weapon(g: Control, cx: float) -> void:
+	var ay: float = vs.y - 24
+	var melee: bool = winfo.get("melee", false)
+	var wcol: Color = winfo.get("color", ORANGE)
+	var free: bool = winfo.get("free_ammo", false)
+	var juiced: bool = winfo.get("juiced", false)
+	var reserve: int = winfo.get("reserve", -1)
+	var wid: String = winfo.get("id", "shotgun")
+	var border := _a(INK, 0.9)
+	if juiced:
+		border = GREEN if _blink(0.4) else YELLOW   # a perfectly reloaded magazine
+	var filled := float(ammo)
+	if reloading:
+		filled = max_ammo * reload_frac
+	var half := 0.0
+	if melee:
+		half = 47.0
+		_box(g, Rect2(cx - half - 5, ay - 4, half * 2 + 10, 22), _a(INK, 0.55), border)
+		_text(g, "NO AMMO NEEDED", Vector2(cx, ay + 4), 1, wcol, 1)
+	elif max_ammo <= 12:
+		# one drawn round per shot: shells for the shotguns, slugs in the weapon's colour otherwise
+		var shells := wid == "shotgun" or wid == "double"
+		var sw := 8.0
+		var total := max_ammo * sw - 2.0
+		half = max(total * 0.5, 14.0)
+		var ax: float = floor(cx - total * 0.5)
+		_box(g, Rect2(cx - half - 5, ay - 4, half * 2 + 10, 22), _a(INK, 0.55), border)
+		for i in max_ammo:
+			var x := ax + i * sw
+			if i < int(filled):
+				var hop := 0.0
+				if reloading and i == int(filled) - 1:
+					hop = -2.0
+				if shells:
+					_r(g, Rect2(x + 1, ay + hop, 4, 1), RED)
+					_r(g, Rect2(x, ay + 1 + hop, 6, 9), RED)
+					_r(g, Rect2(x + 1, ay + 1 + hop, 1, 9), RED.lightened(0.45))
+					_r(g, Rect2(x, ay + 10 + hop, 6, 4), YELLOW)
+					_r(g, Rect2(x, ay + 12 + hop, 6, 1), ORANGE)
+				else:
+					_r(g, Rect2(x + 1, ay + hop, 4, 1), wcol)
+					_r(g, Rect2(x, ay + 1 + hop, 6, 13), wcol)
+					_r(g, Rect2(x + 1, ay + 1 + hop, 1, 13), wcol.lightened(0.5))
+					_r(g, Rect2(x, ay + 11 + hop, 6, 3), wcol.darkened(0.35))
+			else:
+				_r(g, Rect2(x, ay + 1, 6, 13), Color(1, 1, 1, 0.13))
+	else:
+		# a big magazine: a bar and a number
+		half = 48.0
+		_box(g, Rect2(cx - half - 5, ay - 4, half * 2 + 10, 22), _a(INK, 0.55), border)
+		_text(g, "%d / %d" % [int(filled), max_ammo], Vector2(cx, ay - 1), 1, PAPER, 1)
+		_r(g, Rect2(cx - half, ay + 9, half * 2, 6), Color(1, 1, 1, 0.13))
+		var fw: float = round(half * 2 * clamp(filled / max(max_ammo, 1), 0.0, 1.0))
+		if fw > 0:
+			_r(g, Rect2(cx - half, ay + 9, fw, 6), wcol)
+			_r(g, Rect2(cx - half, ay + 9, fw, 1), wcol.lightened(0.5))
+	# spare ammo, right of the magazine
+	if not melee:
+		var rx := cx + half + 9
+		if free:
+			_text(g, "FREE!", Vector2(rx, ay + 4), 1, YELLOW if _blink(0.3) else ORANGE)
+		elif reserve < 0:
+			_text(g, "INF", Vector2(rx, ay + 4), 1, _a(PAPER, 0.5))
+		else:
+			_text(g, "+%d" % reserve, Vector2(rx, ay + 4), 1, RED if reserve == 0 else PAPER)
+
+	# the slots: the weapon in hand with its name, the others as icons
+	var slots: Array = winfo.get("slot_info", [])
+	var sy := ay - 20
+	var key_w := 0.0 if touch_mode else 8.0
+	var widths := []
+	var total_w := -3.0
+	for sl in slots:
+		var w: float = 22.0 + key_w + (_text_w(sl.name, 1) + 6.0 if sl.id == wid else 0.0)
+		widths.append(w)
+		total_w += w + 3.0
+	var x: float = floor(cx - total_w * 0.5)
+	for i in slots.size():
+		var sl: Dictionary = slots[i]
+		var cur: bool = sl.id == wid
+		var has_ammo: bool = sl.melee or sl.ammo > 0 or sl.reserve != 0
+		var scol: Color = sl.color if has_ammo else Color(0.5, 0.5, 0.55)
+		_box(g, Rect2(x, sy, widths[i], 13), _a(INK, 0.8 if cur else 0.5), _a(scol, 0.95) if cur else _a(PAPER, 0.3))
+		var xx := x + 3
+		if not touch_mode:
+			_text(g, str(i + 1), Vector2(xx, sy + 3), 1, YELLOW if cur else _a(PAPER, 0.55))
+			xx += key_w
+		if tex.has(sl.icon):
+			_icon_mid(g, sl.icon, Vector2(xx + 8, sy + 6), 1, scol if cur else _a(scol, 0.75))
+		if cur:
+			_text(g, sl.name, Vector2(xx + 19, sy + 3), 1, PAPER)
+		x += widths[i] + 3
+
+	# status line above the slots
+	var ty := sy - 12
+	if reloading:
+		if _blink(0.3):
+			_text(g, "RELOADING", Vector2(cx, ty), 1, YELLOW, 1)
+	elif melee or free:
+		pass
+	elif ammo == 0 and reserve == 0:
+		if _blink(0.4):
+			_text(g, "OUT OF AMMO!", Vector2(cx, ty), 1, RED, 1)
+	elif ammo == 0:
+		if _blink(0.4):
+			_text(g, "EMPTY! RELOAD" if touch_mode else "EMPTY! PRESS R", Vector2(cx, ty), 1, RED, 1)
+	elif ammo <= max(2, max_ammo / 6) and max_ammo > 2 and _blink(0.6):
+		_text(g, "LOW AMMO", Vector2(cx, ty), 1, ORANGE, 1)
+
+	# a crate is offering a weapon but every slot is full
+	if not prompt.is_empty():
+		var pcol: Color = prompt.get("color", YELLOW)
+		var ptext: String = prompt.get("text", "")
+		var py := vs.y - 138 if touch_mode else vs.y - 84
+		var pw: float = _text_w(ptext, 1) + (0.0 if touch_mode else 26.0)
+		_box(g, Rect2(cx - pw * 0.5 - 6, py - 4, pw + 12, 15), _a(INK, 0.8), pcol)
+		if touch_mode:
+			_text(g, ptext, Vector2(cx, py), 1, PAPER, 1)
+		else:
+			var kx: float = cx - pw * 0.5
+			_box(g, Rect2(kx, py - 2, 18, 11), Color(0.2, 0.19, 0.3), _a(PAPER, 0.8))
+			_text(g, "C", Vector2(kx + 9, py), 1, YELLOW if _blink(0.5) else PAPER, 1)
+			_text(g, ptext, Vector2(kx + 26, py), 1, PAPER)
+
+# Running power-ups (and the bonk frenzy), top-right under the small buttons.
+func _draw_powers(g: Control) -> void:
+	var y := 36.0
+	for pw in powers:
+		var col: Color = pw.color
+		var frac: float = clamp(pw.frac, 0.0, 1.0)
+		if frac < 0.25 and not _blink(0.3):
+			col = _a(col, 0.5)
+		_text(g, pw.name, Vector2(vs.x - 8, y), 1, col, 2)
+		_r(g, Rect2(vs.x - 70, y + 9, 62, 4), INK)
+		_r(g, Rect2(vs.x - 69, y + 10, round(60.0 * frac), 2), col)
+		y += 17.0
+
+# Pickup / event messages, stacked under the combo.
+func _draw_toasts(g: Control, cx: float) -> void:
+	var y := 72.0
+	if banner_t > 0.0:
+		y = floor(vs.y * 0.23) + 54.0   # below the wave banner while it is up
+	for t in toasts:
+		if t.t <= 0.0:
+			continue
+		var age: float = TOAST_TIME - t.t
+		var a: float = clamp(t.t / 0.4, 0.0, 1.0)
+		var sc := 2.0 if t.big else 1.0
+		var w: float = _text_w(t.text, sc)
+		var h := 9.0 * sc + 4.0
+		var slide: float = round((1.0 - ease(clamp(age / 0.18, 0.0, 1.0), 0.3)) * -24.0)
+		var col: Color = t.color
+		if t.big and age < 0.5 and fmod(time, 0.12) < 0.06:
+			col = Color.WHITE
+		_r(g, Rect2(cx - w * 0.5 - 8 + slide, y - 3, w + 16, h), _a(INK, 0.66 * a))
+		_r(g, Rect2(cx - w * 0.5 - 8 + slide, y - 3, 2, h), _a(col, a))
+		_r(g, Rect2(cx + w * 0.5 + 6 + slide, y - 3, 2, h), _a(col, a))
+		_text(g, t.text, Vector2(cx + slide, y), sc, _a(col, a), 1)
+		y += h + 3.0
+
+# Where the crates are: a tag over a drop that is on screen, an arrow at the screen edge
+# towards one that is not, both with the distance in metres.
+func _draw_markers(g: Control) -> void:
+	if markers.is_empty():
+		return
+	var m := get_parent()
+	if m == null or not ("cam" in m) or m.cam == null:
+		return
+	var cam: Camera3D = m.cam
+	var ppos: Vector3 = m.player.position if "player" in m and m.player != null else cam.global_position
+	var area := Rect2(30, 44, vs.x - 60, vs.y - 124)
+	var mid := area.get_center()
+	var inv := cam.global_transform.affine_inverse()
+	for mk in markers:
+		var pos: Vector3 = mk.pos
+		var col: Color = mk.color
+		var left: float = mk.left
+		if left >= 0.0 and left < 6.0 and not _blink(0.3):
+			col = _a(col, 0.45)
+		var local: Vector3 = inv * pos
+		var sp: Vector2 = cam.unproject_position(pos) / px
+		var dist := int(round(Vector2(pos.x - ppos.x, pos.z - ppos.z).length()))
+		var label: String = "%s %dM" % [mk.label, dist]
+		if left >= 0.0 and left < 15.0:
+			label += " %dS" % int(ceil(left))
+		if local.z < 0.0 and area.has_point(sp):
+			# on screen: a bobbing chevron above the crate
+			var bob: float = round(sin(time * 5.0) * 2.0)
+			var tip := Vector2(round(sp.x), round(sp.y) - 6 + bob)
+			g.draw_colored_polygon(PackedVector2Array([tip + Vector2(0, 2), tip + Vector2(-7, -8), tip + Vector2(7, -8)]), INK)
+			g.draw_colored_polygon(PackedVector2Array([tip, tip + Vector2(-5, -7), tip + Vector2(5, -7)]), col)
+			_text(g, label, tip + Vector2(0, -19), 1, col, 1)
+		else:
+			# off screen (or behind): an arrow on the edge of the play area
+			var dir := Vector2(local.x, -local.y)
+			if local.z < 0.0:
+				dir = sp - mid
+			if dir.length() < 0.001:
+				dir = Vector2(0, 1)
+			dir = dir.normalized()
+			var k: float = min(area.size.x * 0.5 / max(abs(dir.x), 0.0001), area.size.y * 0.5 / max(abs(dir.y), 0.0001))
+			var at := (mid + dir * k).round()
+			var side := Vector2(-dir.y, dir.x)
+			var pulse: float = 1.0 + 0.15 * sin(time * 7.0)
+			g.draw_colored_polygon(PackedVector2Array([at + dir * 11 * pulse, at - dir * 5 + side * 9, at - dir * 5 - side * 9]), INK)
+			g.draw_colored_polygon(PackedVector2Array([at + dir * 8 * pulse, at - dir * 3 + side * 6, at - dir * 3 - side * 6]), col)
+			var tp := at - dir * 16
+			if abs(dir.x) > abs(dir.y):
+				tp = at + Vector2(0, -14)   # at the side edges the label sits above the arrow
+			tp.x = clamp(tp.x, _text_w(label, 1) * 0.5 + 4, vs.x - _text_w(label, 1) * 0.5 - 4)
+			_text(g, label, tp + Vector2(0, -4), 1, col, 1)
+
+# Markers, power-up timers and the swap prompt come straight from drops.gd (the HUD's parent is main).
+func _read_drops() -> void:
+	var m := get_parent()
+	var d = m.drops if m != null and "drops" in m else null
+	if d == null or screen != SCREEN_NONE:
+		markers = []
+		powers = []
+		prompt = {}
+		return
+	markers = d.markers() if d.has_method("markers") else []
+	powers = d.powerups() if d.has_method("powerups") else []
+	var was := prompt.is_empty()
+	prompt = d.prompt() if d.has_method("prompt") else {}
+	if was != prompt.is_empty():
+		pad.queue_redraw()
+
+# A short message under the combo ("NEW WEAPON: ...", "AIRDROP INCOMING!"). big = larger letters.
+func toast(text: String, color := PAPER, big := false) -> void:
+	var t: Dictionary = toasts[0]
+	for c in toasts:   # a free line, or else the one that has been up longest
+		if c.t <= 0.0:
+			t = c
+			break
+		if c.t < t.t:
+			t = c
+	toasts.erase(t)
+	toasts.append(t)   # newest at the bottom
+	t.t = TOAST_TIME
+	t.text = text
+	t.color = color
+	t.big = big or text.begins_with("NEW WEAPON")
+
 func _draw_crosshair(g: Control) -> void:
 	var c := (vs * 0.5).floor()
+	var pstate: int = winfo.get("perfect", 0)
+	var pflash: float = winfo.get("perfect_t", 0.0)
 	if reloading:
-		# a filling ring instead of the ticks: you cannot shoot right now
+		# a filling ring instead of the ticks: you cannot shoot right now. The green arc is
+		# the perfect-reload window: press reload again while the ring is inside it.
 		var p := reload_frac
+		var lo: float = winfo.get("perfect_lo", 2.0)
+		var hi: float = winfo.get("perfect_hi", 2.0)
 		g.draw_arc(c, 9, 0, TAU, 20, _a(INK, 0.7), 4.0)
-		g.draw_arc(c, 9, -PI * 0.5, -PI * 0.5 + TAU * p, 20, YELLOW, 2.0)
+		if pstate == 0 and lo < 1.0:
+			g.draw_arc(c, 11, -PI * 0.5 + TAU * lo, -PI * 0.5 + TAU * hi, 8, GREEN if p <= hi else _a(GREEN, 0.3), 3.0)
+			if p >= lo and p <= hi:
+				_text(g, "NOW!", c + Vector2(0, 16), 1, GREEN, 1)
+		g.draw_arc(c, 9, -PI * 0.5, -PI * 0.5 + TAU * p, 20, RED if pstate == 2 else YELLOW, 2.0)
+		if pstate == 2 and pflash > 0.0:
+			_text(g, "FUMBLE!", c + Vector2(0, 16), 1, RED, 1)
+	elif pstate == 1 and pflash > 0.0:
+		_text(g, "PERFECT!", c + Vector2(0, 16), 2 if pflash > 0.65 else 1, GREEN if _blink(0.16) else YELLOW, 1)
+	if reloading:
+		pass
 	else:
 		var gap: float = 3.0 + round(cross_kick * 5.0)
 		var col := PAPER if ammo > 0 else RED
@@ -769,11 +1068,27 @@ func _draw_pad() -> void:
 		var dr: Rect2 = rects["dash"]
 		pad.draw_arc(dr.get_center(), dr.size.x * 0.5 - 2.0, -PI * 0.5, -PI * 0.5 + TAU * dash_ready, 24, YELLOW, 2.0)
 	var sready := shove_ready >= 1.0
-	var violet := Color(0.72, 0.56, 1.0)
+	var violet := VIOLET
 	_draw_round("shove", "SHOVE", violet.lerp(Color.WHITE, shove_flash) if sready else Color(0.55, 0.55, 0.6), "fist")
 	if not sready:
 		var hr: Rect2 = rects["shove"]
 		pad.draw_arc(hr.get_center(), hr.size.x * 0.5 - 2.0, -PI * 0.5, -PI * 0.5 + TAU * shove_ready, 24, violet, 2.0)
+	# next weapon (in the colour of the one in hand), hot sauce, and - only while a crate
+	# offers a weapon with every slot full - the swap button
+	var wc: Color = winfo.get("color", ORANGE)
+	var slots: Array = winfo.get("slot_info", [])
+	_draw_round("weapon", "WEAPON", wc if slots.size() > 1 else Color(0.55, 0.55, 0.6))
+	var tready := throw_ready >= 1.0
+	_draw_round("throw", "SAUCE", SAUCE.lerp(Color.WHITE, throw_flash) if tready else Color(0.55, 0.55, 0.6), "boom")
+	if not tready:
+		var tr: Rect2 = rects["throw"]
+		pad.draw_arc(tr.get_center(), tr.size.x * 0.5 - 2.0, -PI * 0.5, -PI * 0.5 + TAU * throw_ready, 24, SAUCE, 2.0)
+	if not prompt.is_empty():
+		var gr: Rect2 = rects["grab"]
+		var gc: Color = prompt.get("color", YELLOW)
+		var gdown: bool = down["grab"]
+		_box(pad, gr, _a(gc, 0.9) if gdown else _a(INK, 0.75), gc.lerp(Color.WHITE, 0.5 + 0.5 * sin(time * 8.0)))
+		_text(pad, "SWAP", Vector2(gr.get_center().x, gr.position.y + 15), 2, Color.WHITE if gdown else gc, 1)
 
 # ------------------------------------------------------------------ overlays
 
@@ -829,16 +1144,16 @@ func _draw_title(o: Control, cx: float) -> void:
 	if touch_mode:
 		_box(o, Rect2(cx - 150, 186, 300, 50), _a(INK, 0.7), _a(PAPER, 0.5))
 		_text(o, "LEFT THUMB: MOVE     RIGHT THUMB: SWIPE TO AIM", Vector2(cx, 196), 1, PAPER, 1)
-		_text(o, "FIRE - JUMP - DASH - SHOVE - RELOAD ON THE RIGHT", Vector2(cx, 210), 1, _a(PAPER, 0.8), 1)
+		_text(o, "FIRE - JUMP - DASH - SHOVE - SAUCE - WEAPON ON THE RIGHT", Vector2(cx, 210), 1, _a(PAPER, 0.8), 1)
 		_text(o, "AIM FOR THE HEAD FOR BONUS POINTS!", Vector2(cx, 224), 1, YELLOW, 1)
 	else:
 		var keys := [["WASD", "MOVE"], ["MOUSE", "AIM"], ["LMB", "SHOOT"], ["R", "RELOAD"],
-			["E", "SHOVE"], ["SHIFT", "DASH"], ["SPACE", "JUMP"], ["V", "VIEW"], ["F", "FULLSCREEN"],
-			["G", "RESOLUTION"]]
-		_box(o, Rect2(cx - 132, 178, 264, 92), _a(INK, 0.7), _a(PAPER, 0.5))
+			["E", "SHOVE"], ["SHIFT", "DASH"], ["SPACE", "JUMP"], ["Q", "NEXT WEAPON"], ["T", "HOT SAUCE"],
+			["V", "VIEW"], ["F", "FULLSCREEN"], ["G", "RESOLUTION"]]
+		_box(o, Rect2(cx - 132, 176, 264, 98), _a(INK, 0.7), _a(PAPER, 0.5))
 		for i in keys.size():
-			var kx: float = cx - 120 + (i / 5) * 130
-			var ky: float = 185 + (i % 5) * 16
+			var kx: float = cx - 120 + (i / 6) * 130
+			var ky: float = 181 + (i % 6) * 15
 			_box(o, Rect2(kx, ky, 40, 13), Color(0.2, 0.19, 0.3), _a(PAPER, 0.8))
 			_r(o, Rect2(kx + 1, ky + 11, 38, 1), _a(PAPER, 0.35))
 			_text(o, keys[i][0], Vector2(kx + 20, ky + 3), 1, YELLOW, 1)
@@ -930,6 +1245,8 @@ func button_rect(name: String) -> Rect2:
 
 # Is the button currently usable? (touch-only buttons are hidden on desktop)
 func button_active(name: String) -> bool:
+	if name == "grab":
+		return touch_mode and not prompt.is_empty()
 	return name == "full" or name == "res" or touch_mode
 
 # Touches that start inside this rectangle drive the movement joystick.
@@ -964,7 +1281,8 @@ func set_sens(level: int) -> void:
 
 # d has: hp, max_hp, ammo, max_ammo, reloading (bool), reload_frac (0..1), score, wave, combo,
 # combo_frac (0..1 of the combo timer left), hurt (0..1), dash_ready (0..1), shove_ready (0..1),
-# zombies_left. Every key is optional.
+# zombies_left, weapon (weapons.hud_info(): the weapon panel, perfect reload, bonk meter and
+# hot sauce cooldown). Every key is optional.
 func update_stats(d: Dictionary) -> void:
 	var new_hp: float = d.get("hp", hp)
 	var new_score: int = d.get("score", score)
@@ -1010,6 +1328,17 @@ func update_stats(d: Dictionary) -> void:
 	if sr >= 1.0 and shove_ready < 1.0:
 		shove_flash = 1.0
 	shove_ready = sr
+	winfo = d.get("weapon", winfo)
+	var wkey: String = "%s%d" % [winfo.get("id", ""), winfo.get("slots", []).size()]
+	if wkey != pad_key:   # the WEAPON button shows the colour of the weapon in hand
+		pad_key = wkey
+		pad.queue_redraw()
+	var tr: float = winfo.get("throw_ready", 1.0)
+	if tr >= 1.0 and throw_ready < 1.0:
+		throw_flash = 1.0
+	throw_ready = tr
+	bonk = winfo.get("bonk", 0.0)
+	frenzy = winfo.get("frenzy", 0.0)
 	var zl: int = d.get("zombies_left", 0)
 	if zl != zombies_left or left_str == "":
 		zombies_left = zl
