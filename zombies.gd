@@ -65,6 +65,8 @@ const BLAST_DELAY := 0.12         # a shot bloater pops a beat later, so chains 
 const LIVE_CAP_TOUCH := 28
 const LIVE_CAP_DESKTOP := 40
 const SPAWN_MIN_DIST := 15.0      # never spawn closer to the player than this
+const SPAWN_MAX_DIST := 45.0      # ... nor further away (the city is endless)
+const STRAY_DIST := 70.0          # a zombie left this far behind is moved near the player
 const HURT_TOKEN_BLOCK := 1.0     # no new attacks for this long after the player was hurt
 const TOKEN_GAP := 0.3            # least time between two zombies starting an attack
 const WAIT_SEEN := 0.1            # how long a zombie in view must be in range before attacking
@@ -111,7 +113,9 @@ var _lull_age := 0.0
 var _lull_base := 4.0
 var _pt := -1              # spawn point of the current pack, and a second one for big packs
 var _pt2 := -1
-var _last_pt := -1
+var _pts: Array = []       # spawn points on offer for the current pack: [{pos, subway}]
+var _last_pos := Vector3(1e9, 0, 1e9)   # where the previous pack came from
+var _reloc_t := 0.0
 var _burst_n := 0
 var _live := {}            # type -> how many alive
 var _booms: Array = []     # delayed bloater blasts: [{pos, t, blast}]
@@ -254,16 +258,24 @@ func _run_spawner(dt: float, ppos: Vector3, camf: Vector3) -> void:
 			_lull = _lull_base
 			_lull_age = 0.0
 		return
+	if _pt >= 0:
+		# endless city: the pack's spawn point goes stale when the player runs off
+		var pd: float = (_pts[_pt].pos as Vector3).distance_to(ppos)
+		if pd > SPAWN_MAX_DIST + 15.0 or pd < SPAWN_MIN_DIST - 5.0:
+			_pt = -1
 	if _pt < 0:
-		_pt = _pick_point(ppos, camf, _last_pt, -1)
-		_pt2 = _pick_point(ppos, camf, _last_pt, _pt)
-		_last_pt = _pt
+		_pts = main.world.spawn_points(ppos, SPAWN_MIN_DIST, SPAWN_MAX_DIST)
+		if _pts.is_empty():
+			_pts = [{"pos": L.clamp_to_streets(ppos + Vector3(20, 0, 0), 1.0), "subway": false}]
+		_pt = _pick_point(ppos, camf, -1, -1)
+		_pt2 = _pick_point(ppos, camf, -1, _pt)
+		_last_pos = _pts[_pt].pos
 		_burst_n = 0
 	var type: String = q[qi]
 	q.remove_at(qi)
 	_pending -= 1
 	var pt := _pt2 if (q.size() + _burst_n > 9 and _burst_n % 3 == 2) else _pt
-	if type == "sanitation" and pt >= 4:  # too big for a subway stairwell
+	if type == "sanitation" and _pts[pt].subway:  # too big for a subway stairwell
 		pt = _pick_point(ppos, camf, -1, -1, true)
 	_burst_n += 1
 	_spawn(type, pt)
@@ -272,39 +284,94 @@ func _run_spawner(dt: float, ppos: Vector3, camf: Vector3) -> void:
 		_lull = _lull_base
 		_lull_age = 0.0
 
-# Choose a spawn point: out of sight if possible, never close, not the one just used,
+# Choose a spawn point (an index into _pts, the street spots world.gd offers round the
+# player): out of sight if possible, never close, not where the last pack came from,
 # otherwise the nearest (so the pack arrives soon).
 func _pick_point(ppos: Vector3, camf: Vector3, avoid: int, avoid2: int, street_only := false) -> int:
-	var pts: Array = L.spawn_points()
 	var nav = main.nav
 	var best := 0
 	var best_s := -1e9
-	for i in pts.size():
-		if street_only and i >= 4:
+	for i in _pts.size():
+		var sp: Dictionary = _pts[i]
+		if street_only and sp.subway:
 			continue
-		var p: Vector3 = pts[i]
+		var p: Vector3 = sp.pos
 		var to := p - ppos
 		to.y = 0
 		var d := to.length()
-		var steps: int = nav.dist[nav.cell(p)]
+		var steps: int = nav.steps(p)
 		var walk: float = float(steps) if steps >= 0 else d
 		var s := -walk * 0.5 + _rng.randf_range(-6.0, 6.0)
 		if d < SPAWN_MIN_DIST or walk < SPAWN_MIN_DIST:
 			s -= 1000.0 - d
-		var same_street: bool = (L.in_ns(p) and L.in_ns(ppos)) or (L.in_ew(p) and L.in_ew(ppos))
-		if not (same_street and d > 0.01 and camf.dot(to / d) > VIEW_DOT):
+		if not (d > 0.01 and camf.dot(to / d) > VIEW_DOT and L.sight_clear(ppos, p)):
 			s += 100.0  # the player cannot see it
-		if i == avoid or i == avoid2:
+		if i == avoid or i == avoid2 or p.distance_to(_last_pos) < 12.0:
 			s -= 60.0
 		if s > best_s:
 			best_s = s
 			best = i
 	return best
 
+# Endless city: a zombie the player has outrun (far behind, or cut off from the pathfinding
+# window) is moved to a fresh out-of-view spawn point near the player instead of being left
+# stranded, so a wave can always be finished.
+func _relocate_strays(ppos: Vector3, camf: Vector3) -> void:
+	var nav = main.nav
+	var pts: Array = []
+	for z in list:
+		var p: Vector3 = z.rig.position
+		var d := Vector2(p.x - ppos.x, p.z - ppos.z).length()
+		var lost: bool = int(z.state) == S_CHASE and (d > STRAY_DIST or (d > 20.0 and not nav.reachable(p)))
+		if not lost:
+			z.lost = 0
+			continue
+		z.lost = int(z.get("lost", 0)) + 1
+		if int(z.lost) < 4 and d <= STRAY_DIST:
+			continue   # cut off: give the flow field two seconds to catch up first
+		if pts.is_empty():
+			pts = main.world.spawn_points(ppos, SPAWN_MIN_DIST, SPAWN_MAX_DIST)
+			if pts.is_empty():
+				return
+		var best := -1
+		var best_s := -1e9
+		for i in pts.size():
+			var sp: Dictionary = pts[i]
+			if sp.subway and z.type == "sanitation":
+				continue
+			var q: Vector3 = sp.pos
+			var to := q - ppos
+			to.y = 0
+			var qd := to.length()
+			var s := _rng.randf_range(0.0, 20.0) - absf(qd - 30.0)
+			if not (camf.dot(to / maxf(qd, 0.01)) > VIEW_DOT and L.sight_clear(ppos, q)):
+				s += 100.0
+			if s > best_s:
+				best_s = s
+				best = i
+		if best < 0:
+			continue
+		var np: Vector3 = pts[best].pos
+		for k in 8:
+			var c: Vector3 = L.clamp_to_streets(np + Vector3(_rng.randf_range(-3.0, 3.0), 0, _rng.randf_range(-3.0, 3.0)), 1.0)
+			if not nav.is_blocked(c):
+				np = c
+				break
+		var rise: float = float(z.T.rise) + (0.5 if pts[best].subway else 0.0)
+		z.rig.position = np
+		z.state = S_SPAWN
+		z.t = rise
+		z.vel = Vector3.ZERO
+		z.kb = Vector3.ZERO
+		z.prog_pos = np
+		z.lost = 0
+		z.rig.spawn_rise(rise)
+		main.fx.zombie_spawn(np)
+
 func _spawn(type: String, pt: int) -> void:
 	var T: Dictionary = TYPES[type]
 	var nav = main.nav
-	var base: Vector3 = L.spawn_points()[pt]
+	var base: Vector3 = _pts[pt].pos
 	var pos := base
 	for i in 8:
 		var c: Vector3 = L.clamp_to_streets(base + Vector3(_rng.randf_range(-3.0, 3.0), 0, _rng.randf_range(-3.0, 3.0)), 1.0)
@@ -328,7 +395,7 @@ func _spawn(type: String, pt: int) -> void:
 	if type == "sanitation":
 		hp = T.hp * (1.0 + 0.5 * (wave / 5 - 1))
 	var speed: float = (T.speed + _rng.randf() * float(T.speed_var)) * (1.0 + min(0.025 * (wave - 1), 0.35))
-	var rise: float = T.rise + (0.5 if pt >= 4 else 0.0)  # subway spawns climb the stairs
+	var rise: float = T.rise + (0.5 if _pts[pt].subway else 0.0)  # subway spawns climb the stairs
 	var z := {"rig": rig, "type": type, "hp": hp, "dead": false, "score_mult": T.score, "dmg": T.dmg,
 		"T": T, "state": S_SPAWN, "t": rise, "speed": speed, "areas": [],
 		"ring": float(T.ring) + _rng.randf() * float(T.ring_var), "side": 1.0 if _rng.randf() < 0.5 else -1.0,
@@ -522,7 +589,13 @@ func update(dt: float) -> void:
 			wave_cleared.emit(wave)
 		return
 
-	# pass 1: copy positions into flat arrays and bucket them in 2 m cells, count attackers
+	_reloc_t -= dt
+	if _reloc_t <= 0.0:
+		_reloc_t = 0.5
+		_relocate_strays(ppos, camf)
+
+	# pass 1: copy positions into flat arrays and bucket them in 2 m cells (a grid centred
+	# on the player), count attackers
 	_px.resize(n)
 	_pz.resize(n)
 	_rad.resize(n)
@@ -535,7 +608,7 @@ func update(dt: float) -> void:
 		_px[i] = p.x
 		_pz[i] = p.z
 		_rad[i] = z.rig.radius
-		var c := clampi(int(p.z * 0.5 + 24.0), 0, GRID - 1) * GRID + clampi(int(p.x * 0.5 + 24.0), 0, GRID - 1)
+		var c := clampi(int((p.z - ppos.z) * 0.5 + 24.0), 0, GRID - 1) * GRID + clampi(int((p.x - ppos.x) * 0.5 + 24.0), 0, GRID - 1)
 		_next[i] = _cell_head[c]
 		_cell_head[c] = i
 		var st: int = z.state
@@ -763,8 +836,8 @@ func _think(i: int, z: Dictionary, T: Dictionary, pos: Vector3, dx: float, dz: f
 	var push_z := 0.0
 	var ahead := false
 	var ri := _rad[i]
-	var cx := clampi(int(pos.x * 0.5 + 24.0), 0, GRID - 1)
-	var cz := clampi(int(pos.z * 0.5 + 24.0), 0, GRID - 1)
+	var cx := clampi(int((pos.x - ppos.x) * 0.5 + 24.0), 0, GRID - 1)
+	var cz := clampi(int((pos.z - ppos.z) * 0.5 + 24.0), 0, GRID - 1)
 	for gz in range(maxi(cz - 1, 0), mini(cz + 2, GRID)):
 		for gx in range(maxi(cx - 1, 0), mini(cx + 2, GRID)):
 			var j := _cell_head[gz * GRID + gx]
