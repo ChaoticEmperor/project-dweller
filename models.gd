@@ -4,7 +4,8 @@ extends RefCounted
 # (see zombie_rig.gd: Rig.material() and Rig.Sculpt).
 const Rig = preload("res://zombie_rig.gd")
 
-const ZOMBIE_TYPES := ["commuter", "delivery", "bloater", "sanitation"]
+const ZOMBIE_TYPES := ["commuter", "delivery", "bloater", "sanitation",
+	"monkey", "rat", "hardhat", "riot", "vendor", "cabbie"]
 
 const SURVIVOR_SKIN := Color(0.90, 0.68, 0.52)
 const JACKET := Color(0.78, 0.26, 0.16)
@@ -25,6 +26,15 @@ static func prewarm() -> void:
 	for t in ZOMBIE_TYPES:
 		for k in (120 if t == "commuter" else 6):
 			make_zombie(t, rng).free()
+	for kind in ["hotdog", "marker"]:
+		zombie_prop(kind)
+	Rig._hardhat_hat()
+
+# Small meshes zombies.gd throws about (shared character material, cached):
+# "hotdog" (the vendor's projectile, about 0.9 m long, along Z) and "marker" (a flat warning
+# ring of radius 1 m, lying in the XZ plane, drawn unshaded).
+static func zombie_prop(kind: String) -> ArrayMesh:
+	return Rig.prop(kind)
 
 # First-person pump shotgun. Barrel points along -Z, origin at the grip. Children:
 # "Muzzle" (Node3D at the barrel tip) and "Pump" (the fore-end and the left hand; slide

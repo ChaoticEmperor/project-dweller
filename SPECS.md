@@ -140,9 +140,33 @@ The city is generated from `L.SEED` and block coordinates only (same place = sam
   than 70 m from the player, or cut off from the nav window for 2 s, is moved to a fresh out-of-view spawn point
   (`_relocate_strays`), so a wave can always be finished.
 - Zombie types (ids, frozen): `commuter` (standard), `delivery` (fast, weak, lunges), `bloater` (slow, swells then
-  explodes, hurting player and zombies), `sanitation` (huge slow boss).
-- zombies.gd calls `main.fx.zombie_spawn(pos)`, `main.fx.explosion(pos, radius)` and `main.sfx.play_at(...)` itself;
-  hit/kill effects and sounds are triggered by main from the signals — do not double them.
+  explodes, hurting player and zombies), `sanitation` (huge slow boss), and the place-bound specials:
+  `monkey` (runs to a wall, climbs 4-7.5 m, screeches, leaps at where the player stood; shot off the wall it falls and
+  lies dazed), `hardhat` (hard hat shrugs off two volleys of head shots, then flies off), `riot` (shield stops
+  everything that lands on it while he walks; turns slowly; open when attacking, staggered or shoved), `vendor` (keeps
+  ~11 m away and lobs hot dogs at a marked spot; they can be shot down), `rat` (subway packs of four, tiny, a shove
+  kills them), `cabbie` (honks, then charges 16 m in a straight line).
+- One table row per type in `TYPES` (numbers + flags; the optional flags and their defaults are listed at
+  `TYPE_DEFAULTS`); names for the floating labels in `NAMES_BY_TYPE`.
+- **Where specials appear:** a wave contains `?` slots (from wave 3, 10 % rising to 26 % of the budget, each worth 2
+  budget). When a pack picks its spawn point the slots become real types drawn from `ENV[biome][key]` weight rows:
+  `any`, `block:<L.block_type>` for the blocks touching the spawn point or the player, `theme:<L.seg_theme>` for the
+  street segment there, `subway` (stairwell within 30 m). Types before their first wave or at their live cap are left
+  out; `commuter` in a row = no special. First meeting of a type in a run: it comes alone (`intro` of them) at the
+  head of its pack. **Adding an environment = one row; adding a biome = one top-level `ENV` entry** named as
+  `L.biome_at()` returns it (unknown biomes use `downtown`; `residential` / `beach` / `desert` rows exist but are
+  inactive until layout.gd returns those names). Wave 2 always opens with a pair of monkeys.
+- Hit boxes: every `Area3D` carries meta `"zombie"` and `"head"`; the riot shield's box also carries `"part": "shield"`
+  and is only solid while the shield is up — `hit()` itself decides that a hit landed on the shield (no damage, no
+  `zombie_hit`). A vendor's hot dog in flight is an `Area3D` whose `"zombie"` meta is a Dictionary with `"proj"`:
+  `hit()` pops it. Anything iterating `list` never sees projectiles. Monkeys on a wall have `rig.position.y > 0`
+  (state `>= S_CLIMB`); `shove` skips them, `damage_radius` measures in 3D.
+- Monkey safety rules: only walls from `L.nearest_facade` at least 5 m high with the player within 12.5 m of the wall's
+  plane; never above the wall top; at most 9 s on a wall, 3.5 s hanging still, dropped at once when the player is 26 m
+  away; a drop / fall always lands on a free street cell; no wall in reach (parks, open lots) = ordinary melee on foot.
+- zombies.gd calls `main.fx.zombie_spawn(pos)`, `main.fx.explosion(pos, radius)`, `main.fx.explosion_colored`,
+  `main.fx.impact` (shield / hard hat sparks, landing dust), `main.fx.gibs` (hot dog splat) and
+  `main.sfx.play_at(...)` itself; hit/kill effects and sounds are triggered by main from the signals — do not double them.
 
 ## models.gd / zombie_rig.gd
 - `Models.make_zombie(type: String, rng: RandomNumberGenerator) -> Node3D` returns a rig (script `zombie_rig.gd`).
@@ -161,6 +185,16 @@ The city is generated from `L.SEED` and block coordinates only (same place = sam
   - `die(dir: Vector3, headshot: bool) -> float` plays the death, returns seconds until it may be freed
   - `spawn_rise(duration: float)` entrance animation
   - `set_label(text: String, color := Color.WHITE)`, `set_label_visible(on: bool)`
+  - added for the special types (all optional, harmless on any type):
+    `set_mode(mode)` with `Rig.M_GROUND / M_CLIMB` (upright, belly to the wall the rig faces) `/ M_PERCH` (on a wall
+    facing out; `set_windup` drives the screech) `/ M_AIR` (leap) `/ M_TUMBLE` (knocked off, spinning);
+    `climb_shapes()` = `hit_shapes()` repositioned for the upright modes (same order and sizes);
+    `set_alert(k)` 0..1 red telegraph blink; `set_guard(on)` riot shield in front / swung aside;
+    `has_hat()`, `knock_hat(dir)` (hard hat flies off, head mesh swaps to the bare one);
+    `hit_shapes()` entries may carry `"part": "shield"`. A rig that dies above the street falls to it by itself.
+- `Models.zombie_prop(kind) -> ArrayMesh`: `"hotdog"` (vendor projectile) and `"marker"` (flat landing ring, radius 1).
+- Draw calls per zombie stay at 6 (rat 4); one extra shared material (the alert tint); the knocked-off hat is one
+  temporary mesh for 1.8 s.
 
 ## sfx.gd (extends Node)
 - `setup()`, `play(name: String, pitch := 1.0, volume_db := 0.0)`, `play_at(name, pos: Vector3, pitch := 1.0)`,
@@ -172,8 +206,10 @@ The city is generated from `L.SEED` and block coordinates only (same place = sam
 - Weapon / drop names (frozen too): `shoot_revolver shoot_smg shoot_bow shoot_double shoot_launcher shoot_pigeon hose swing
   pan_hit reload_mag switch perfect throw glass pigeon_pop frenzy crate_land airdrop pickup powerup heal ammo`
   (played by weapons.gd and drops.gd).
-- Called by: main (player and scoring sounds), zombies.gd (`zombie_*`, `bloater_swell`, `explode`, `boss_step` via `play_at`),
-  hud.gd (`ui_click`).
+- Special-zombie names (frozen too, played by zombies.gd): `monkey_screech` (leap telegraph) `monkey_chatter monkey_leap
+  monkey_thud helmet_clang helmet_off shield_clang vendor_throw splat taxi_honk` (charge telegraph) `rat_squeak`.
+- Called by: main (player and scoring sounds), zombies.gd (`zombie_*`, `bloater_swell`, `explode`, `boss_step` and the
+  special-zombie names via `play_at`), hud.gd (`ui_click`).
 
 ## weapons.gd (extends Node)
 - `setup(main)`; `update(dt)` — main calls it every frame while playing (not during the upgrade draft). It reads

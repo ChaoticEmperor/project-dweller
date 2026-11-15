@@ -24,6 +24,26 @@ const LIME_HOT := Color(0.85, 1.0, 0.35)
 const HIVIS := Color(0.80, 1.0, 0.10)
 const SILVER := Color(0.86, 0.90, 0.94)
 const METAL := Color(0.64, 0.68, 0.73)
+# signature colours of the newer types
+const FUR := Color(0.95, 0.50, 0.12)          # monkey
+const HAT_YELLOW := Color(1.0, 0.80, 0.08)    # hard hat
+const VEST_ORANGE := Color(1.0, 0.42, 0.05)
+const NAVY := Color(0.24, 0.33, 0.62)         # riot cop
+const SHIELD_CYAN := Color(0.35, 0.90, 1.0)
+const KETCHUP := Color(0.92, 0.12, 0.10)      # vendor
+const MUSTARD := Color(1.0, 0.82, 0.12)
+const CAB_YELLOW := Color(1.0, 0.78, 0.05)    # cabbie
+const CHEESE := Color(1.0, 0.74, 0.18)        # pizza rat
+const RAT_GREY := Color(0.64, 0.58, 0.57)
+const RAT_PINK := Color(1.0, 0.62, 0.66)
+
+# body modes (set_mode): on the ground, climbing a wall (belly to it), perched on a wall
+# facing out, flying through the air, tumbling down
+const M_GROUND := 0
+const M_CLIMB := 1
+const M_PERCH := 2
+const M_AIR := 3
+const M_TUMBLE := 4
 
 const D_PLANK := 0
 const D_FACEPLANT := 1
@@ -70,6 +90,7 @@ var _tilt0 := 0.0
 var _arm_base := [1.3, 1.3]
 var _arm_up := [2.9, 2.9]
 var _splay := 0.0
+var _arm_swing := 0.16
 var _ph := 0.0
 
 # state
@@ -98,6 +119,21 @@ var _death_len := 1.0
 var _fall := Vector3(0, 0, 1)
 var _d0 := [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 var _bumped := false
+var _mode := M_GROUND
+var _spin := 0.0
+var _alert := 0.0
+var _alert_on := false
+var _guard := 1.0          # riot shield: 1 held in front, 0 swung aside
+var _guard_to := 1.0
+var _has_shield := false
+var _shield_c := Vector3.ZERO     # shield centre / size, rig-local before scale
+var _shield_size := Vector3.ZERO
+var _has_hat := false
+var _bare_head: ArrayMesh
+var _hat_node: MeshInstance3D
+var _hat_vel := Vector3.ZERO
+var _hat_t := 0.0
+var _vy := 0.0             # a body that dies up a wall falls to the street
 
 static var _last_death := -1
 
@@ -105,6 +141,7 @@ static var _last_death := -1
 static var _mat: ShaderMaterial
 static var _levels: Array = []      # [null, glow1, glow2, glow3] material overrides
 static var _flash_mat: ShaderMaterial
+static var _alert_mat: ShaderMaterial
 static var _cache := {}
 
 const SHADER := """
@@ -143,6 +180,10 @@ static func material() -> ShaderMaterial:
 		_flash_mat.shader = sh
 		_flash_mat.set_shader_parameter("tint", Vector3(1, 1, 1))
 		_flash_mat.set_shader_parameter("tint_k", 1.0)
+		_alert_mat = ShaderMaterial.new()
+		_alert_mat.shader = sh
+		_alert_mat.set_shader_parameter("tint", Vector3(1.0, 0.22, 0.08))
+		_alert_mat.set_shader_parameter("tint_k", 0.5)
 	return _mat
 
 # Merges coloured boxes into one mesh. Face shading (dark undersides, lighter tops,
@@ -265,6 +306,94 @@ func build(p_type: String, rng: RandomNumberGenerator) -> void:
 			torso_m = _sanitation_torso()
 			arm_m = [_sanitation_arm(skin, false), _sanitation_arm(skin, true)]
 			leg_m = _sanitation_leg()
+		"monkey":
+			_s = Vector3.ONE * 1.35
+			skin = FUR
+			_leg = 0.36; _leg_x = 0.12; _neck = 0.46; _head_size = Vector3(0.36, 0.32, 0.32); _hat = 0.12
+			_tw = 0.42; _td = 0.30; _sh = Vector2(0.27, 0.40)
+			_hunch = 0.8; _lean_gain = 0.15; _ref_speed = 6.0; _stride = 0.9
+			_arm_base = [0.8, 0.8]      # = the hunch: arms hang straight down, knuckles on the street
+			_arm_up = [2.9, 2.9]
+			_arm_swing = 0.6
+			_limp = 0.0
+			head_m = _monkey_head()
+			torso_m = _monkey_torso()
+			arm_m = [_monkey_arm(), _monkey_arm()]
+			leg_m = _monkey_leg()
+		"rat":
+			_s = Vector3.ONE * rng.randf_range(1.4, 1.65)
+			skin = RAT_GREY
+			_leg = 0.13; _leg_x = 0.10; _neck = 0.50; _head_size = Vector3(0.22, 0.18, 0.24); _hat = 0.0
+			_tw = 0.26; _td = 0.22; _sh = Vector2(0.1, 0.42)
+			_hunch = 1.4; _lean_gain = 0.04; _ref_speed = 6.0; _stride = 0.9
+			_arm_base = [1.4, 1.4]
+			_arm_up = [1.4, 1.4]
+			_limp = 0.0
+			_tilt0 *= 0.4
+			head_m = _rat_head()
+			torso_m = _rat_torso()
+			leg_m = _rat_leg()      # no arm meshes: the front paws are part of the body (4 draw calls)
+		"hardhat":
+			var si := rng.randi() % SKINS.size()
+			skin = SKINS[si]
+			_s = Vector3(1.12, rng.randf_range(0.96, 1.04), 1.12)
+			_hat = 0.18
+			_tw = 0.64; _td = 0.36
+			_hunch = rng.randf_range(0.08, 0.18)
+			_stride = 0.5
+			_arm_base = [1.25 - _hunch, 0.2]     # left arm grabs, right arm drags a wrench
+			_arm_up = [2.6, 3.0]
+			head_m = _hardhat_head(si, true)
+			_bare_head = _hardhat_head(si, false)
+			_has_hat = true
+			torso_m = _hardhat_torso()
+			arm_m = [_hardhat_arm(si, false), _hardhat_arm(si, true)]
+			leg_m = _hardhat_leg()
+		"riot":
+			var si := rng.randi() % SKINS.size()
+			skin = SKINS[si]
+			_s = Vector3.ONE * 1.08
+			_hat = 0.06
+			_tw = 0.66; _td = 0.38; _sh = Vector2(0.40, 0.56)
+			_hunch = 0.08; _lean_gain = 0.05; _ref_speed = 3.0; _stride = 0.42
+			_arm_base = [1.05, 0.45]     # left arm holds the shield out in front, right arm a baton
+			_arm_up = [2.5, 2.9]
+			_arm_swing = 0.05
+			_limp = 0.0
+			_has_shield = true
+			_shield_c = Vector3(-0.12, _leg + 0.10, -0.50)
+			_shield_size = Vector3(0.80, 1.18, 0.07)
+			head_m = _riot_head(si)
+			torso_m = _riot_torso()
+			arm_m = [_riot_arm(true, _arm_base[0] - _hunch, _shield_c - Vector3(-_sh.x, _leg + _sh.y, 0), _shield_size), _riot_arm(false, 0.0, Vector3.ZERO, Vector3.ZERO)]
+			leg_m = _riot_leg()
+		"vendor":
+			var si := rng.randi() % SKINS.size()
+			skin = SKINS[si]
+			_s = Vector3(1.15, 1.0, 1.15)
+			_hat = 0.12
+			_tw = 0.74; _td = 0.5; _sh = Vector2(0.44, 0.56)
+			_hunch = 0.05; _lean_gain = 0.05; _ref_speed = 2.5; _stride = 0.4
+			_arm_base = [0.45, 1.25]     # right arm holds the next hot dog up
+			_arm_up = [0.7, 3.4]
+			head_m = _vendor_head(si)
+			torso_m = _vendor_torso()
+			arm_m = [_vendor_arm(si, false), _vendor_arm(si, true)]
+			leg_m = _vendor_leg()
+		"cabbie":
+			var si := rng.randi() % SKINS.size()
+			skin = SKINS[si]
+			_s = Vector3(1.0, 1.02, 1.0)
+			_hat = 0.30
+			_hunch = 0.3; _lean_gain = 0.25; _ref_speed = 6.0; _stride = 0.7
+			_arm_base = [1.25, 1.25]     # both hands on the wheel
+			_arm_up = [1.7, 1.7]
+			_arm_swing = 0.04
+			_limp = 0.0
+			head_m = _cabbie_head(si)
+			torso_m = _cabbie_torso()
+			arm_m = [_cabbie_arm(si), _cabbie_arm(si)]
+			leg_m = _cabbie_leg()
 		_:
 			var r := rng.randf()
 			var sx := rng.randf_range(0.95, 1.05)
@@ -326,6 +455,10 @@ func build(p_type: String, rng: RandomNumberGenerator) -> void:
 		_chest.add_child(am)
 		_arms.append(am)
 	height = (_leg + (_neck + _head_size.y + _hat) * cos(_hunch)) * _s.y
+	if type == "vendor":
+		height = (_leg + 1.56) * _s.y     # the umbrella
+	elif type == "rat":
+		height = 0.5 * _s.y               # the pizza slice on its back
 	radius = maxf(_tw, _td) * 0.5 * _s.x
 	set_process(false)
 	_pose_now(0.0)
@@ -641,6 +774,402 @@ static func _sanitation_leg() -> ArrayMesh:
 	_cache["sl"] = bake(m)
 	return _cache["sl"]
 
+# ---- monkey (escaped from the zoo): orange fur, long arms, curly tail, a little red fez
+static func _monkey_head() -> ArrayMesh:
+	if _cache.has("mh"):
+		return _cache["mh"]
+	var face := Color(0.62, 0.82, 0.42)
+	var m := Sculpt.new()
+	m.box(Vector3(0.36, 0.32, 0.32), Vector3(0, 0.16, 0), FUR, 0.45)
+	m.box(Vector3(0.28, 0.20, 0.03), Vector3(0, 0.17, -0.165), face)
+	m.box(Vector3(0.22, 0.13, 0.11), Vector3(0, 0.075, -0.20), face.lightened(0.12))          # muzzle
+	m.box(Vector3(0.17, 0.04, 0.03), Vector3(0, 0.055, -0.262), DARK)
+	m.box(Vector3(0.04, 0.055, 0.03), Vector3(-0.05, 0.035, -0.268), Color(0.97, 0.95, 0.85), 0.6)
+	m.box(Vector3(0.04, 0.055, 0.03), Vector3(0.055, 0.035, -0.268), Color(0.97, 0.95, 0.85), 0.6)
+	m.box(Vector3(0.11, 0.11, 0.03), Vector3(-0.085, 0.205, -0.185), EYE, 1.0)
+	m.box(Vector3(0.04, 0.045, 0.03), Vector3(-0.07, 0.20, -0.192), DARK)
+	m.box(Vector3(0.075, 0.07, 0.03), Vector3(0.09, 0.195, -0.185), EYE, 1.0)
+	m.box(Vector3(0.03, 0.03, 0.03), Vector3(0.09, 0.195, -0.192), DARK)
+	m.pair(Vector3(0.07, 0.18, 0.06), Vector3(0.215, 0.18, 0.0), FUR.lightened(0.15), 0.3)   # big ears
+	m.pair(Vector3(0.03, 0.10, 0.03), Vector3(0.235, 0.18, -0.02), RAT_PINK, 0.3)
+	m.box(Vector3(0.19, 0.13, 0.19), Vector3(0.04, 0.385, 0.0), KETCHUP, 0.6, Vector3(0, 0, -0.15))   # fez
+	m.box(Vector3(0.03, 0.12, 0.03), Vector3(0.16, 0.40, 0.0), MUSTARD, 0.9)                          # tassel
+	_cache["mh"] = bake(m)
+	return _cache["mh"]
+
+static func _monkey_torso() -> ArrayMesh:
+	if _cache.has("mt"):
+		return _cache["mt"]
+	var m := Sculpt.new()
+	m.box(Vector3(0.42, 0.46, 0.30), Vector3(0, 0.23, 0), FUR, 0.45)
+	m.box(Vector3(0.26, 0.30, 0.03), Vector3(0, 0.22, -0.155), Color(0.98, 0.80, 0.52), 0.3)   # belly
+	m.box(Vector3(0.44, 0.05, 0.32), Vector3(0, 0.40, 0), Color(0.2, 0.5, 1.0), 0.6)           # zoo collar
+	m.box(Vector3(0.07, 0.08, 0.03), Vector3(0.0, 0.34, -0.17), MUSTARD, 0.9)                  # its tag
+	# the tail: out, up and curled over (it stands up behind the hunched body)
+	m.box(Vector3(0.07, 0.07, 0.34), Vector3(0, 0.04, 0.30), FUR.darkened(0.1), 0.45)
+	m.box(Vector3(0.07, 0.07, 0.30), Vector3(0, 0.04, 0.60), FUR.darkened(0.1), 0.45)
+	m.box(Vector3(0.07, 0.24, 0.07), Vector3(0, 0.13, 0.75), FUR.darkened(0.1), 0.45)
+	m.box(Vector3(0.07, 0.07, 0.20), Vector3(0, 0.25, 0.68), FUR.darkened(0.1), 0.45)
+	m.box(Vector3(0.14, 0.05, 0.14), Vector3(0, 0.475, 0), Color(0.45, 0.08, 0.08))
+	_cache["mt"] = bake(m)
+	return _cache["mt"]
+
+static func _monkey_arm() -> ArrayMesh:
+	if _cache.has("ma"):
+		return _cache["ma"]
+	var m := Sculpt.new()
+	m.box(Vector3(0.12, 0.36, 0.12), Vector3(0, -0.15, 0), FUR, 0.45)
+	m.box(Vector3(0.10, 0.30, 0.10), Vector3(0, -0.45, 0), FUR.darkened(0.12), 0.3)
+	m.box(Vector3(0.14, 0.12, 0.14), Vector3(0, -0.64, 0), Color(0.62, 0.82, 0.42))
+	_cache["ma"] = bake(m)
+	return _cache["ma"]
+
+static func _monkey_leg() -> ArrayMesh:
+	if _cache.has("ml"):
+		return _cache["ml"]
+	var m := Sculpt.new()
+	m.box(Vector3(0.14, 0.30, 0.15), Vector3(0, -0.14, 0), FUR.darkened(0.08), 0.3)
+	m.box(Vector3(0.15, 0.07, 0.25), Vector3(0, -0.325, -0.04), Color(0.62, 0.82, 0.42))
+	_cache["ml"] = bake(m)
+	return _cache["ml"]
+
+# ---- pizza rat: a sewer rat the size of a dog with a slice on its back. The body is the
+# "torso", bent right over, so in this mesh +Y points at the nose and +Z is the back.
+static func _rat_head() -> ArrayMesh:
+	if _cache.has("rh"):
+		return _cache["rh"]
+	var m := Sculpt.new()
+	m.box(Vector3(0.22, 0.18, 0.24), Vector3(0, 0.09, 0), RAT_GREY)
+	m.box(Vector3(0.14, 0.12, 0.12), Vector3(0, 0.06, -0.17), RAT_GREY.lightened(0.1))      # snout
+	m.box(Vector3(0.07, 0.06, 0.05), Vector3(0, 0.09, -0.245), RAT_PINK, 0.5)
+	m.box(Vector3(0.07, 0.07, 0.03), Vector3(0, 0.0, -0.225), Color(0.97, 0.95, 0.8), 0.6)   # buck teeth
+	m.pair(Vector3(0.06, 0.06, 0.03), Vector3(0.075, 0.12, -0.125), EYE, 1.0)
+	m.pair(Vector3(0.12, 0.13, 0.04), Vector3(0.13, 0.21, 0.06), RAT_PINK, 0.35)             # ears
+	_cache["rh"] = bake(m)
+	return _cache["rh"]
+
+static func _rat_torso() -> ArrayMesh:
+	if _cache.has("rt"):
+		return _cache["rt"]
+	var m := Sculpt.new()
+	m.box(Vector3(0.26, 0.50, 0.22), Vector3(0, 0.25, 0), RAT_GREY)
+	m.box(Vector3(0.32, 0.26, 0.27), Vector3(0, 0.12, 0.0), RAT_GREY.darkened(0.12))         # haunches
+	m.box(Vector3(0.05, 0.26, 0.05), Vector3(0, -0.12, 0.03), RAT_PINK, 0.35)                # tail
+	m.box(Vector3(0.04, 0.24, 0.04), Vector3(0.03, -0.34, 0.06), RAT_PINK, 0.35, Vector3(0, 0, 0.3))
+	m.pair(Vector3(0.06, 0.06, 0.15), Vector3(0.11, 0.42, -0.16), RAT_PINK, 0.2)             # front paws
+	# the slice, point forward, wider than the rat
+	var crust := Color(0.80, 0.52, 0.22)
+	m.box(Vector3(0.52, 0.08, 0.07), Vector3(0, 0.03, 0.16), crust, 0.3)
+	m.box(Vector3(0.46, 0.13, 0.04), Vector3(0, 0.13, 0.16), CHEESE, 0.85)
+	m.box(Vector3(0.34, 0.13, 0.04), Vector3(0, 0.26, 0.16), CHEESE, 0.85)
+	m.box(Vector3(0.22, 0.13, 0.04), Vector3(0, 0.39, 0.16), CHEESE, 0.85)
+	m.box(Vector3(0.10, 0.12, 0.04), Vector3(0, 0.51, 0.16), CHEESE, 0.85)
+	m.box(Vector3(0.09, 0.09, 0.02), Vector3(-0.10, 0.15, 0.185), KETCHUP, 0.5)
+	m.box(Vector3(0.08, 0.08, 0.02), Vector3(0.07, 0.27, 0.185), KETCHUP, 0.5)
+	m.box(Vector3(0.07, 0.07, 0.02), Vector3(-0.02, 0.40, 0.185), KETCHUP, 0.5)
+	_cache["rt"] = bake(m)
+	return _cache["rt"]
+
+static func _rat_leg() -> ArrayMesh:
+	if _cache.has("rl"):
+		return _cache["rl"]
+	var m := Sculpt.new()
+	m.box(Vector3(0.08, 0.10, 0.10), Vector3(0, -0.05, 0), RAT_GREY.darkened(0.2))
+	m.box(Vector3(0.07, 0.04, 0.16), Vector3(0, -0.11, -0.04), RAT_PINK, 0.2)
+	_cache["rl"] = bake(m)
+	return _cache["rl"]
+
+# ---- hard hat (building-site worker): yellow hat that takes two head shots, orange vest
+static func _hat_boxes(m: Sculpt, y: float) -> void:
+	m.box(Vector3(0.50, 0.15, 0.50), Vector3(0, y + 0.075, 0.0), HAT_YELLOW, 0.65)
+	m.box(Vector3(0.38, 0.08, 0.40), Vector3(0, y + 0.19, 0.0), HAT_YELLOW, 0.65)
+	m.box(Vector3(0.70, 0.04, 0.74), Vector3(0, y + 0.02, -0.03), HAT_YELLOW.darkened(0.12), 0.55)   # brim all round
+	m.box(Vector3(0.09, 0.20, 0.52), Vector3(0, y + 0.15, 0.0), Color(1.0, 0.95, 0.6), 0.8)
+
+static func _hardhat_hat() -> ArrayMesh:
+	if _cache.has("hhat"):
+		return _cache["hhat"]
+	var m := Sculpt.new()
+	_hat_boxes(m, -0.1)
+	_cache["hhat"] = bake(m)
+	return _cache["hhat"]
+
+static func _hardhat_head(si: int, hat: bool) -> ArrayMesh:
+	var key := "hh%d%s" % [si, "h" if hat else "b"]
+	if _cache.has(key):
+		return _cache[key]
+	var sk: Color = SKINS[si]
+	var m := Sculpt.new()
+	_face(m, sk, DARK, 0.44, 0.42, 0.42)
+	m.box(Vector3(0.46, 0.15, 0.32), Vector3(0, 0.07, -0.07), Color(0.24, 0.2, 0.17))   # stubble
+	if hat:
+		_hat_boxes(m, 0.41)
+	else:
+		m.pair(Vector3(0.05, 0.14, 0.30), Vector3(0.235, 0.36, 0.04), DARK)                # what hair is left
+		m.box(Vector3(0.40, 0.12, 0.05), Vector3(0, 0.36, 0.215), DARK)
+		m.box(Vector3(0.14, 0.09, 0.14), Vector3(0.06, 0.45, -0.02), Color(1.0, 0.45, 0.5), 0.5)   # a fresh bump
+	_cache[key] = bake(m)
+	return _cache[key]
+
+static func _hardhat_torso() -> ArrayMesh:
+	if _cache.has("ht"):
+		return _cache["ht"]
+	var tee := Color(0.62, 0.66, 0.72)
+	var m := Sculpt.new()
+	m.box(Vector3(0.62, 0.64, 0.34), Vector3(0, 0.33, 0), tee)
+	m.box(Vector3(0.70, 0.26, 0.42), Vector3(0, 0.18, -0.02), tee)                        # lunch
+	m.pair(Vector3(0.27, 0.54, 0.05), Vector3(0.19, 0.42, -0.185), VEST_ORANGE, 0.6)
+	m.box(Vector3(0.66, 0.54, 0.05), Vector3(0, 0.42, 0.185), VEST_ORANGE, 0.6)
+	m.pair(Vector3(0.05, 0.54, 0.36), Vector3(0.315, 0.42, 0.0), VEST_ORANGE, 0.6)
+	m.pair(Vector3(0.275, 0.07, 0.06), Vector3(0.19, 0.30, -0.19), SILVER, 0.8)
+	m.pair(Vector3(0.275, 0.07, 0.06), Vector3(0.19, 0.52, -0.19), SILVER, 0.8)
+	m.box(Vector3(0.67, 0.07, 0.06), Vector3(0, 0.30, 0.19), SILVER, 0.8)
+	m.box(Vector3(0.67, 0.07, 0.06), Vector3(0, 0.52, 0.19), SILVER, 0.8)
+	m.box(Vector3(0.72, 0.08, 0.44), Vector3(0, 0.035, -0.02), Color(0.45, 0.28, 0.12))   # tool belt
+	m.box(Vector3(0.14, 0.18, 0.08), Vector3(0.30, -0.04, -0.06), Color(0.45, 0.28, 0.12).darkened(0.2))
+	m.box(Vector3(0.04, 0.20, 0.04), Vector3(0.30, 0.06, -0.06), Color(0.9, 0.2, 0.15), 0.5)   # screwdriver
+	m.box(Vector3(0.20, 0.07, 0.20), Vector3(0, 0.66, 0), Color(0.45, 0.08, 0.08))
+	_cache["ht"] = bake(m)
+	return _cache["ht"]
+
+static func _hardhat_arm(si: int, wrench: bool) -> ArrayMesh:
+	var key := "ha%d%s" % [si, "w" if wrench else "n"]
+	if _cache.has(key):
+		return _cache[key]
+	var sk: Color = SKINS[si]
+	var m := Sculpt.new()
+	m.box(Vector3(0.18, 0.20, 0.19), Vector3(0, -0.07, 0), Color(0.62, 0.66, 0.72))
+	m.box(Vector3(0.15, 0.36, 0.15), Vector3(0, -0.33, 0), sk)
+	m.box(Vector3(0.18, 0.17, 0.18), Vector3(0, -0.60, 0), Color(0.85, 0.62, 0.25))       # work glove
+	if wrench:
+		m.box(Vector3(0.06, 0.06, 0.62), Vector3(0, -0.62, -0.32), METAL, 0.3)
+		m.box(Vector3(0.07, 0.20, 0.10), Vector3(0, -0.62, -0.66), SILVER, 0.5)
+		m.box(Vector3(0.075, 0.07, 0.06), Vector3(0, -0.62, -0.70), DARK)
+	_cache[key] = bake(m)
+	return _cache[key]
+
+static func _hardhat_leg() -> ArrayMesh:
+	if _cache.has("hl"):
+		return _cache["hl"]
+	var m := Sculpt.new()
+	m.box(Vector3(0.24, 0.74, 0.26), Vector3(0, -0.35, 0), Color(0.28, 0.38, 0.62))
+	m.box(Vector3(0.26, 0.13, 0.40), Vector3(0, -0.755, -0.05), Color(0.72, 0.52, 0.22))
+	_cache["hl"] = bake(m)
+	return _cache["hl"]
+
+# ---- riot cop: navy armour, glowing visor, a big cyan shield on the left arm
+static func _riot_head(si: int) -> ArrayMesh:
+	var key := "qh%d" % si
+	if _cache.has(key):
+		return _cache[key]
+	var sk: Color = SKINS[si]
+	var m := Sculpt.new()
+	_face(m, sk, DARK, 0.42, 0.40, 0.42)
+	m.box(Vector3(0.48, 0.22, 0.48), Vector3(0, 0.37, 0.0), NAVY)                    # helmet
+	m.box(Vector3(0.48, 0.30, 0.20), Vector3(0, 0.20, 0.14), NAVY)
+	m.pair(Vector3(0.04, 0.30, 0.30), Vector3(0.23, 0.22, -0.02), NAVY)
+	m.box(Vector3(0.46, 0.13, 0.03), Vector3(0, 0.30, -0.25), SHIELD_CYAN, 1.0, Vector3(-0.25, 0, 0))   # visor, up
+	m.box(Vector3(0.10, 0.06, 0.03), Vector3(0, 0.44, -0.245), MUSTARD, 0.9)          # badge
+	_cache[key] = bake(m)
+	return _cache[key]
+
+static func _riot_torso() -> ArrayMesh:
+	if _cache.has("qt"):
+		return _cache["qt"]
+	var m := Sculpt.new()
+	m.box(Vector3(0.66, 0.66, 0.38), Vector3(0, 0.33, 0), NAVY)
+	m.box(Vector3(0.56, 0.36, 0.06), Vector3(0, 0.42, -0.20), NAVY.darkened(0.3))    # chest plate
+	m.box(Vector3(0.56, 0.36, 0.06), Vector3(0, 0.42, 0.20), NAVY.darkened(0.3))
+	m.box(Vector3(0.40, 0.09, 0.02), Vector3(0, 0.46, 0.235), Color(1, 1, 1), 0.8)   # white bar on the back
+	m.box(Vector3(0.10, 0.10, 0.03), Vector3(-0.15, 0.50, -0.235), MUSTARD, 0.9)
+	m.pair(Vector3(0.26, 0.12, 0.44), Vector3(0.36, 0.62, 0.0), NAVY.darkened(0.3))  # shoulder pads
+	m.box(Vector3(0.68, 0.08, 0.40), Vector3(0, 0.035, 0), DARK)
+	m.box(Vector3(0.20, 0.07, 0.20), Vector3(0, 0.68, 0), Color(0.45, 0.08, 0.08))
+	_cache["qt"] = bake(m)
+	return _cache["qt"]
+
+# The shield is part of the left arm, built so that it stands upright in front of the body
+# when the arm is at its walking angle `th`; `c` is its centre relative to the shoulder.
+static func _riot_arm(shield: bool, th: float, c: Vector3, size: Vector3) -> ArrayMesh:
+	var key := "qa%s" % ("s" if shield else "b")
+	if _cache.has(key):
+		return _cache[key]
+	var m := Sculpt.new()
+	m.box(Vector3(0.20, 0.36, 0.21), Vector3(0, -0.14, 0), NAVY)
+	m.box(Vector3(0.17, 0.26, 0.18), Vector3(0, -0.43, 0), NAVY.darkened(0.25))
+	m.box(Vector3(0.19, 0.15, 0.19), Vector3(0, -0.61, 0), DARK)
+	if shield:
+		var inv := Basis(Vector3.RIGHT, -th)
+		var r := Vector3(-th, 0, 0)
+		var up := Vector3(0, 1, 0)
+		var fw := Vector3(0, 0, -1)
+		m.box(size, inv * c, SHIELD_CYAN, 0.65, r)
+		m.box(Vector3(size.x + 0.06, 0.07, size.z + 0.03), inv * (c + up * (size.y * 0.5)), NAVY, 0.0, r)
+		m.box(Vector3(size.x + 0.06, 0.07, size.z + 0.03), inv * (c - up * (size.y * 0.5)), NAVY, 0.0, r)
+		m.box(Vector3(size.x * 0.8, 0.16, 0.03), inv * (c + up * 0.18 + fw * 0.04), Color(1, 1, 1), 0.9, r)    # stripe
+		m.box(Vector3(size.x * 0.5, 0.10, 0.03), inv * (c + up * 0.40 + fw * 0.04), NAVY, 0.0, r)             # window
+	else:
+		m.box(Vector3(0.06, 0.06, 0.60), Vector3(0, -0.62, -0.28), DARK)                                         # baton
+	_cache[key] = bake(m)
+	return _cache[key]
+
+static func _riot_leg() -> ArrayMesh:
+	if _cache.has("ql"):
+		return _cache["ql"]
+	var m := Sculpt.new()
+	m.box(Vector3(0.24, 0.72, 0.26), Vector3(0, -0.34, 0), NAVY)
+	m.box(Vector3(0.26, 0.16, 0.10), Vector3(0, -0.38, -0.12), NAVY.darkened(0.35))   # knee pad
+	m.box(Vector3(0.26, 0.13, 0.40), Vector3(0, -0.755, -0.05), DARK)
+	_cache["ql"] = bake(m)
+	return _cache["ql"]
+
+# ---- hot-dog vendor: a ketchup-and-mustard cart umbrella strapped to his back
+static func _vendor_head(si: int) -> ArrayMesh:
+	var key := "vh%d" % si
+	if _cache.has(key):
+		return _cache[key]
+	var sk: Color = SKINS[si]
+	var m := Sculpt.new()
+	_face(m, sk, DARK, 0.46, 0.42, 0.44)
+	m.box(Vector3(0.34, 0.07, 0.05), Vector3(0, 0.155, -0.245), DARK)                      # moustache
+	m.box(Vector3(0.40, 0.12, 0.42), Vector3(0, 0.47, 0.0), Color(0.97, 0.97, 0.94), 0.4)  # paper hat
+	m.box(Vector3(0.41, 0.04, 0.43), Vector3(0, 0.44, 0.0), KETCHUP, 0.6)
+	_cache[key] = bake(m)
+	return _cache[key]
+
+static func _vendor_torso() -> ArrayMesh:
+	if _cache.has("vt"):
+		return _cache["vt"]
+	var white := Color(0.95, 0.95, 0.92)
+	var m := Sculpt.new()
+	m.box(Vector3(0.70, 0.64, 0.42), Vector3(0, 0.33, 0), white)
+	m.box(Vector3(0.78, 0.34, 0.54), Vector3(0, 0.20, -0.03), white)                 # belly
+	for k in 5:   # striped apron
+		m.box(Vector3(0.12, 0.60, 0.03), Vector3(-0.24 + k * 0.12, 0.26, -0.31), KETCHUP if k % 2 == 0 else white, 0.5)
+	m.box(Vector3(0.09, 0.20, 0.09), Vector3(-0.36, 0.06, -0.20), KETCHUP, 0.7)      # squeezy bottles on the belt
+	m.box(Vector3(0.09, 0.20, 0.09), Vector3(0.36, 0.06, -0.20), MUSTARD, 0.7)
+	m.box(Vector3(0.22, 0.07, 0.22), Vector3(0, 0.66, 0), Color(0.45, 0.08, 0.08))
+	# the umbrella: pole up the back, eight panels
+	m.box(Vector3(0.05, 1.50, 0.05), Vector3(0, 0.80, 0.27), METAL)
+	var y := 1.46
+	for k in 4:
+		m.box(Vector3(1.50, 0.07, 0.62), Vector3(0, y + k * 0.004, 0.27), KETCHUP if k % 2 == 0 else MUSTARD, 0.7, Vector3(0, k * PI * 0.25, 0))
+	m.box(Vector3(0.60, 0.10, 0.60), Vector3(0, y + 0.07, 0.27), KETCHUP, 0.7)
+	m.box(Vector3(0.10, 0.10, 0.10), Vector3(0, y + 0.16, 0.27), MUSTARD, 0.9)
+	_cache["vt"] = bake(m)
+	return _cache["vt"]
+
+static func _vendor_arm(si: int, hotdog: bool) -> ArrayMesh:
+	var key := "va%d%s" % [si, "h" if hotdog else "n"]
+	if _cache.has(key):
+		return _cache[key]
+	var sk: Color = SKINS[si]
+	var m := Sculpt.new()
+	m.box(Vector3(0.19, 0.24, 0.20), Vector3(0, -0.09, 0), Color(0.95, 0.95, 0.92))
+	m.box(Vector3(0.15, 0.34, 0.15), Vector3(0, -0.36, 0), sk)
+	m.box(Vector3(0.17, 0.15, 0.17), Vector3(0, -0.60, 0), sk.darkened(0.05))
+	if hotdog:
+		m.box(Vector3(0.14, 0.12, 0.40), Vector3(0, -0.70, -0.02), Color(0.90, 0.68, 0.36), 0.3)
+		m.box(Vector3(0.09, 0.09, 0.48), Vector3(0, -0.75, -0.02), KETCHUP.darkened(0.15), 0.4)
+		m.box(Vector3(0.04, 0.03, 0.36), Vector3(0, -0.80, -0.02), MUSTARD, 0.8)
+	else:
+		m.box(Vector3(0.03, 0.03, 0.40), Vector3(0.04, -0.62, -0.22), METAL, 0.4)      # tongs
+		m.box(Vector3(0.03, 0.03, 0.40), Vector3(-0.04, -0.62, -0.22), METAL, 0.4)
+	_cache[key] = bake(m)
+	return _cache[key]
+
+static func _vendor_leg() -> ArrayMesh:
+	if _cache.has("vl"):
+		return _cache["vl"]
+	var m := Sculpt.new()
+	m.box(Vector3(0.25, 0.76, 0.27), Vector3(0, -0.36, 0), Color(0.22, 0.22, 0.26))
+	m.box(Vector3(0.255, 0.10, 0.275), Vector3(0, -0.20, 0), Color(0.95, 0.95, 0.92))
+	m.box(Vector3(0.26, 0.10, 0.38), Vector3(0, -0.77, -0.05), Color(0.95, 0.95, 0.95), 0.2)
+	_cache["vl"] = bake(m)
+	return _cache["vl"]
+
+# ---- cabbie: lit TAXI roof sign on the head, checker band, both hands on the wheel
+static func _cabbie_head(si: int) -> ArrayMesh:
+	var key := "kh%d" % si
+	if _cache.has(key):
+		return _cache[key]
+	var sk: Color = SKINS[si]
+	var m := Sculpt.new()
+	_face(m, sk, DARK, 0.44, 0.42, 0.42)
+	m.box(Vector3(0.48, 0.09, 0.46), Vector3(0, 0.44, 0.0), Color(0.25, 0.2, 0.17))     # flat cap
+	m.box(Vector3(0.40, 0.03, 0.16), Vector3(0, 0.41, -0.28), Color(0.25, 0.2, 0.17))
+	m.box(Vector3(0.70, 0.22, 0.22), Vector3(0, 0.60, 0.0), CAB_YELLOW, 1.0)            # the roof sign
+	m.box(Vector3(0.36, 0.09, 0.23), Vector3(0, 0.60, 0.0), DARK)
+	m.pair(Vector3(0.05, 0.23, 0.23), Vector3(0.36, 0.60, 0.0), DARK)
+	_cache[key] = bake(m)
+	return _cache[key]
+
+static func _cabbie_torso() -> ArrayMesh:
+	if _cache.has("kt"):
+		return _cache["kt"]
+	var m := Sculpt.new()
+	m.box(Vector3(0.60, 0.62, 0.32), Vector3(0, 0.33, 0), CAB_YELLOW, 0.5)
+	for k in 6:   # checker band, front and back
+		var c := DARK if k % 2 == 0 else Color(1, 1, 1)
+		m.box(Vector3(0.10, 0.09, 0.335), Vector3(-0.25 + k * 0.10, 0.40, 0), c, 0.3)
+		m.box(Vector3(0.10, 0.09, 0.335), Vector3(-0.25 + k * 0.10, 0.31, 0), Color(1, 1, 1) if k % 2 == 0 else DARK, 0.3)
+	m.box(Vector3(0.63, 0.07, 0.35), Vector3(0, 0.035, 0), Color(0.14, 0.10, 0.08))
+	m.box(Vector3(0.20, 0.07, 0.20), Vector3(0, 0.66, 0), Color(0.45, 0.08, 0.08))
+	# the steering wheel he never let go of
+	var wc := Vector3(0, 0.34, -0.66)
+	var r := Vector3(-0.5, 0, 0)
+	var b := Basis.from_euler(r)
+	m.box(Vector3(0.50, 0.06, 0.06), wc + b * Vector3(0, 0.22, 0), DARK, 0.0, r)
+	m.box(Vector3(0.50, 0.06, 0.06), wc + b * Vector3(0, -0.22, 0), DARK, 0.0, r)
+	m.box(Vector3(0.06, 0.50, 0.06), wc + b * Vector3(0.22, 0, 0), DARK, 0.0, r)
+	m.box(Vector3(0.06, 0.50, 0.06), wc + b * Vector3(-0.22, 0, 0), DARK, 0.0, r)
+	m.box(Vector3(0.40, 0.05, 0.04), wc, METAL, 0.3, r)
+	m.box(Vector3(0.12, 0.12, 0.06), wc, CAB_YELLOW, 0.9, r)
+	_cache["kt"] = bake(m)
+	return _cache["kt"]
+
+static func _cabbie_arm(si: int) -> ArrayMesh:
+	var key := "ka%d" % si
+	if _cache.has(key):
+		return _cache[key]
+	var sk: Color = SKINS[si]
+	var m := Sculpt.new()
+	m.box(Vector3(0.16, 0.34, 0.17), Vector3(0, -0.13, 0), CAB_YELLOW, 0.5)
+	m.box(Vector3(0.13, 0.26, 0.13), Vector3(0, -0.42, 0), sk)
+	m.box(Vector3(0.16, 0.15, 0.16), Vector3(0, -0.61, 0), sk.darkened(0.05))
+	_cache[key] = bake(m)
+	return _cache[key]
+
+static func _cabbie_leg() -> ArrayMesh:
+	if _cache.has("kl"):
+		return _cache["kl"]
+	var m := Sculpt.new()
+	m.box(Vector3(0.22, 0.76, 0.24), Vector3(0, -0.36, 0), Color(0.36, 0.34, 0.36))
+	m.box(Vector3(0.24, 0.10, 0.36), Vector3(0, -0.77, -0.05), Color(0.95, 0.95, 0.95), 0.2)
+	_cache["kl"] = bake(m)
+	return _cache["kl"]
+
+# ---- props zombies.gd throws about (shared material, cached)
+static func prop(kind: String) -> ArrayMesh:
+	var key := "prop_" + kind
+	if _cache.has(key):
+		return _cache[key]
+	var m := Sculpt.new()
+	match kind:
+		"hotdog":      # the vendor's hot dog, far too big, far too much mustard
+			m.box(Vector3(0.30, 0.20, 0.70), Vector3(0, -0.03, 0), Color(0.90, 0.68, 0.36), 0.4)
+			m.box(Vector3(0.18, 0.18, 0.86), Vector3(0, 0.08, 0), KETCHUP.darkened(0.1), 0.5)
+			for k in 5:
+				m.box(Vector3(0.10, 0.06, 0.10), Vector3(0.04 if k % 2 == 0 else -0.04, 0.18, -0.30 + k * 0.15), MUSTARD, 0.9)
+		_:             # "marker": a flat warning ring of radius 1 where something is about to land
+			for k in 12:
+				var a := k * TAU / 12.0
+				m.box(Vector3(0.46, 0.02, 0.12), Vector3(cos(a), 0, sin(a)), KETCHUP if k % 2 == 0 else MUSTARD, 1.0, Vector3(0, -a + PI * 0.5, 0))
+			m.box(Vector3(0.5, 0.02, 0.1), Vector3.ZERO, KETCHUP, 1.0, Vector3(0, PI * 0.25, 0))
+			m.box(Vector3(0.5, 0.02, 0.1), Vector3.ZERO, KETCHUP, 1.0, Vector3(0, -PI * 0.25, 0))
+	_cache[key] = bake(m)
+	return _cache[key]
+
 # ---------------------------------------------------------------- queries
 # Hit boxes in rig-local space: [{ "size": Vector3, "pos": Vector3, "head": bool }]
 func hit_shapes() -> Array:
@@ -658,6 +1187,19 @@ func hit_shapes() -> Array:
 	else:
 		out[0].size.y += _leg * _s.y
 		out[0].pos.y -= _leg * _s.y * 0.5
+	if _has_shield:   # stops bullets, takes no damage (zombies.gd decides from "part")
+		out.append({"size": (_shield_size + Vector3(0.06, 0.06, 0.07)) * _s, "pos": _shield_c * _s, "head": false, "part": "shield"})
+	return out
+
+# The same boxes (same order and sizes) placed for a body that is upright on a wall or in the
+# air (set_mode other than M_GROUND). zombies.gd moves its hit boxes when the mode changes.
+func climb_shapes() -> Array:
+	var out := hit_shapes()
+	var body_y := _leg + _neck * 0.5
+	if _leg <= 0.4:
+		body_y -= _leg * 0.5
+	out[0].pos = Vector3(0, body_y, 0) * _s
+	out[1].pos = Vector3(0, _leg + _neck + (_head_size.y + _hat) * 0.5, 0) * _s
 	return out
 
 # World position of the head centre.
@@ -701,6 +1243,19 @@ func _pose_now(dt: float, speed := 0.0) -> void:
 		_twitch = 0.28
 	_twitch = maxf(_twitch - dt, 0.0)
 	var tw := sin(_twitch * 45.0) * _twitch * 2.2
+	# telegraph blink (set_alert), shield arm, a hard hat in flight
+	if _alert > 0.0:
+		var on := sin(_t * (16.0 + 26.0 * _alert)) > 0.0
+		if on != _alert_on:
+			_alert_on = on
+			_apply_mat()
+	elif _alert_on:
+		_alert_on = false
+		_apply_mat()
+	if _guard != _guard_to:
+		_guard = move_toward(_guard, _guard_to, dt * 7.0)
+	if _hat_node != null:
+		_hat_step(dt)
 
 	var s := sin(_phase)
 	var w := _walk
@@ -735,6 +1290,9 @@ func _pose_now(dt: float, speed := 0.0) -> void:
 			_pose.rotation = Vector3.ZERO
 			_sqv += 3.5   # pop!
 			set_process(false)
+	if _mode != M_GROUND:
+		_pose_mode(dt, sin(_phase), wu)
+		return
 
 	# legs and hips
 	var amp := _stride * w
@@ -766,13 +1324,78 @@ func _pose_now(dt: float, speed := 0.0) -> void:
 	for a in 2:
 		var side := a * 2.0 - 1.0
 		var base: float = _arm_base[a]
-		var ang := base + sin(_phase + a * PI + 0.7) * 0.16 * w + sin(_t * 1.7 + a * 2.0 + _ph) * 0.05
+		var ang := base + sin(_phase + a * PI + 0.7) * _arm_swing * w + sin(_t * 1.7 + a * 2.0 + _ph) * 0.05
 		ang -= idle * 0.12 * minf(base, 1.0)
 		ang = lerpf(ang, _arm_up[a], wu)
 		ang = lerpf(ang, 0.55, sk)
 		ang = lerpf(ang, 3.0, rise)
 		ang += fl_len * 0.7 + _swell * (0.5 + sin(_t * 23.0 + a) * 0.25)
-		_arms[a].rotation = Vector3(ang, 0, side * (_splay + wu * 0.35 + rise * 0.2 + fl_len * 0.3))
+		var out := _splay + wu * 0.35 + rise * 0.2 + fl_len * 0.3
+		if a == 0 and _has_shield:
+			out += (1.0 - _guard) * 1.25      # guard down: the shield swings out of the way
+		_arms[a].rotation = Vector3(ang, 0, side * out)
+
+# The poses of a body that is not walking on the ground (monkeys): s = sin of the limb cycle.
+func _pose_mode(dt: float, s: float, wu: float) -> void:
+	_legs[0].position.y = _leg
+	_legs[1].position.y = _leg
+	_chest.position = Vector3(0, _leg, 0)
+	match _mode:
+		M_CLIMB:    # belly to the wall, hand over hand
+			_legs[0].rotation.x = 0.9 + s * 0.6
+			_legs[1].rotation.x = 0.9 - s * 0.6
+			_chest.rotation = Vector3(0.1, s * 0.14, s * 0.1 - _fl.x * 0.5)
+			_head.rotation = Vector3(0.35, sin(_t * 2.6 + _ph) * 0.6, _tilt0)
+			_arms[0].rotation = Vector3(2.75 + s * 0.5, 0, -0.12)
+			_arms[1].rotation = Vector3(2.75 - s * 0.5, 0, 0.12)
+		M_PERCH:    # back to the wall, hanging by one arm; winds up into a screech
+			var shake := sin(_t * 38.0) * wu
+			_legs[0].rotation.x = -0.75
+			_legs[1].rotation.x = -0.55 + shake * 0.15
+			_chest.rotation = Vector3(-0.5 - wu * 0.25, sin(_t * 2.0 + _ph) * 0.12, shake * 0.06)
+			_head.rotation = Vector3(0.15 + wu * 0.35, sin(_t * 1.3 + _ph) * 0.3 * (1.0 - wu), _tilt0 + shake * 0.12)
+			_arms[0].rotation = Vector3(3.9, 0, -0.25)
+			_arms[1].rotation = Vector3(lerpf(0.7, 2.7, wu) + shake * 0.4, 0, 0.3 + 0.5 * wu)
+		M_AIR:      # the leap: arms out front, legs trailing
+			_legs[0].rotation.x = -0.6
+			_legs[1].rotation.x = -0.95
+			_chest.rotation = Vector3(-0.95, 0, sin(_t * 9.0) * 0.08)
+			_head.rotation = Vector3(0.8, 0, _tilt0)
+			_arms[0].rotation = Vector3(2.6, 0, -0.75)
+			_arms[1].rotation = Vector3(2.6, 0, 0.75)
+		_:          # knocked off: head over heels, everything flailing
+			_spin += dt * 11.0
+			var c := Vector3(0, height * 0.45, 0)
+			var rot := Basis(Vector3.RIGHT, _spin)
+			_pose.transform = Transform3D(rot, c - rot * c)
+			var f := sin(_t * 24.0)
+			_legs[0].rotation.x = f * 0.9
+			_legs[1].rotation.x = -f * 0.9
+			_chest.rotation = Vector3(-0.3, 0, 0)
+			_head.rotation = Vector3(0.3, 0, f * 0.3)
+			_arms[0].rotation = Vector3(2.2 + f, 0, -1.0)
+			_arms[1].rotation = Vector3(2.2 - f, 0, 1.0)
+
+# A knocked-off hard hat: flies, bounces once, lies there for a moment.
+func _hat_step(dt: float) -> void:
+	_hat_t += dt
+	if _hat_t > 1.8:
+		_hat_node.queue_free()
+		_hat_node = null
+		return
+	var hp := _hat_node.position
+	if hp.y > 0.12 or _hat_vel.y > 0.0:
+		_hat_vel.y -= 20.0 * dt
+		hp += _hat_vel * dt
+		_hat_node.rotate_object_local(Vector3(1, 0, 0.3).normalized(), 12.0 * dt)
+		if hp.y <= 0.12:
+			hp.y = 0.12
+			if _hat_vel.y < -4.0:
+				_hat_vel = Vector3(_hat_vel.x * 0.5, -_hat_vel.y * 0.35, _hat_vel.z * 0.5)
+			else:
+				_hat_vel = Vector3.ZERO
+				_hat_node.rotation = Vector3(0, _hat_node.rotation.y, 0)
+		_hat_node.position = hp
 
 func _step_scale(dt: float) -> void:
 	# squash-and-stretch spring
@@ -796,7 +1419,7 @@ func _step_scale(dt: float) -> void:
 	_parts.scale = Vector3(_s.x * xz, _s.y * y, _s.z * xz)
 
 func _apply_mat() -> void:
-	var m: Material = _flash_mat if _flash_t > 0.0 else _levels[_mat_level]
+	var m: Material = _flash_mat if _flash_t > 0.0 else (_alert_mat if _alert_on else _levels[_mat_level])
 	_chest.material_override = m
 	_head.material_override = m
 	for a in 2:
@@ -813,6 +1436,45 @@ func strike() -> void:
 	_windup = 0.0
 	_strike_t = 0.0
 	_sqv += 1.5
+
+# Body mode (monkeys): M_GROUND walking, M_CLIMB on a wall facing it, M_PERCH on a wall facing
+# out (set_windup drives its screech), M_AIR leaping, M_TUMBLE knocked off and falling.
+func set_mode(mode: int) -> void:
+	if mode == _mode:
+		return
+	_mode = mode
+	_spin = 0.0
+	if _rise_t < 0.0 and not _dead:
+		_pose.transform = Transform3D.IDENTITY
+
+# 0..1 "about to do something nasty" blink (a red flicker that speeds up); 0 switches it off.
+func set_alert(k: float) -> void:
+	_alert = clampf(k, 0.0, 1.0)
+
+# Riot shield up (in front of the body) or swung aside.
+func set_guard(on: bool) -> void:
+	_guard_to = 1.0 if on else 0.0
+
+func has_hat() -> bool:
+	return _has_hat
+
+# Hard hat: knock it off (the head underneath is bare from now on); it flies along `dir`.
+func knock_hat(dir: Vector3) -> void:
+	if not _has_hat:
+		return
+	_has_hat = false
+	_head.mesh = _bare_head
+	if not is_inside_tree():
+		return
+	_hat_node = MeshInstance3D.new()
+	_hat_node.mesh = _hardhat_hat()
+	_hat_node.top_level = true
+	add_child(_hat_node)
+	_hat_node.global_transform = Transform3D(Basis.from_scale(_s), _head.global_transform * Vector3(0, 0.5, 0))
+	var flat := Vector3(dir.x, 0, dir.z)
+	flat = flat.normalized() if flat.length_squared() > 0.0001 else Vector3(0, 0, 1)
+	_hat_vel = flat * 3.5 + Vector3(randf_range(-1.0, 1.0), 6.0, randf_range(-1.0, 1.0))
+	_hat_t = 0.0
 
 # React to a hit coming from direction `dir` (world space), strength 0..1.
 func flinch(dir: Vector3, strength: float) -> void:
@@ -875,12 +1537,24 @@ func die(dir: Vector3, headshot: bool) -> float:
 	_dead = true
 	_rise_t = -1.0
 	_windup = 0.0
+	_mode = M_GROUND
+	_guard_to = 0.0
+	if _alert_on or _alert > 0.0:
+		_alert = 0.0
+		_alert_on = false
+		_apply_mat()
 	_fall = _local_dir(dir)
 	var back := _fall.z    # > 0: knocked onto its back, < 0: shot from behind
 	var weights := [3.0 if absf(back) > 0.3 else 1.5, 0.6 if back > 0.3 else 2.0, 1.5, 1.5, 4.0 if headshot else 0.7, 1.2, 0.0]
-	if type == "sanitation" or type == "bloater":
+	if type == "sanitation" or type == "bloater" or type == "riot" or type == "vendor":
 		weights[D_BACKFLIP] = 0.0   # too heavy to fly
 		weights[D_HOP] = 0.6
+	elif type == "rat":             # too low for the sitting and kneeling gags: flip or flop
+		weights = [2.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0]
+	elif type == "monkey":
+		weights[D_SPIN_SIT] = 0.0
+		weights[D_KNEES] = 0.0
+		weights[D_BACKFLIP] += 2.0
 	if _swell >= 0.5:
 		_death = D_POP
 	else:
@@ -956,6 +1630,11 @@ func _death_step(dt: float) -> void:
 		_flash_t -= dt
 		if _flash_t <= 0.0:
 			_apply_mat()
+	if position.y > 0.0:    # died up a wall or in mid-air: drop to the street
+		_vy += 28.0 * dt
+		position.y = maxf(position.y - _vy * dt, 0.0)
+	if _hat_node != null:
+		_hat_step(dt)
 	match _death:
 		D_PLANK:   # stiff as a board, straight over, one bounce
 			var q := clampf(t / 0.62, 0.0, 1.0)

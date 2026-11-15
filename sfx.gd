@@ -77,6 +77,18 @@ const CONF := {
 	"powerup": [0.65, 200, 0.0, 1],
 	"heal": [0.55, 200, 0.0, 1],
 	"ammo": [0.55, 150, 0.0, 1],
+	# the newer zombie types (played by zombies.gd)
+	"monkey_screech": [0.75, 250, 0.06, 1],
+	"monkey_chatter": [0.45, 300, 0.12, 0],
+	"monkey_leap": [0.6, 120, 0.08, 0],
+	"monkey_thud": [0.7, 120, 0.06, 0],
+	"helmet_clang": [0.8, 70, 0.04, 0],
+	"helmet_off": [0.85, 100, 0.03, 1],
+	"shield_clang": [0.7, 70, 0.05, 0],
+	"vendor_throw": [0.55, 150, 0.06, 0],
+	"splat": [0.75, 100, 0.08, 0],
+	"taxi_honk": [0.75, 300, 0.04, 1],
+	"rat_squeak": [0.4, 200, 0.15, 0],
 }
 
 # Built once and kept across scene reloads (a restart must not rebuild or re-register samples).
@@ -468,7 +480,83 @@ func _build_all() -> void:
 	s["boss_step"] = [_wav(b, "boss_step")]
 
 	_build_weapon_sounds(s)
+	_build_zombie_extras(s)
 	_cache["streams"] = s
+
+# The sounds of the place-bound zombie types. Short on purpose (start-up time).
+func _build_zombie_extras(s: Dictionary) -> void:
+	var b: PackedFloat32Array
+
+	b = _buf(0.62)  # monkey screech: three rising shrieks, each higher (the leap telegraph)
+	for k in 3:
+		var f := 900.0 + k * 130.0
+		_tone(b, k * 0.2, 0.17, f, f * 1.9, SAW, 0.7, 0.004, 1, 0.5, 34.0, 0.1)
+		_tone(b, k * 0.2, 0.17, f * 1.5, f * 2.6, SQR, 0.25, 0.004, 1, 0.3)
+		_noise(b, k * 0.2, 0.12, 0.25, 5000, 2500, 1500)
+	_crush(b, 2, 40.0)
+	s["monkey_screech"] = [_wav(b, "monkey_screech")]
+
+	b = _buf(0.46)  # "ooh ooh ah ah"
+	var hoots := [430.0, 470.0, 620.0, 660.0]
+	for k in 4:
+		var f: float = hoots[k]
+		_tone(b, k * 0.105, 0.085, f, f * (1.25 if k < 2 else 0.85), SQR, 0.6, 0.004, 1, 0.3)
+		_tone(b, k * 0.105, 0.085, f * 2.0, f * 2.4, TRI, 0.25, 0.004, 1)
+	s["monkey_chatter"] = [_wav(b, "monkey_chatter")]
+
+	b = _buf(0.36)  # the leap: a whoosh with a yelp in it
+	_noise(b, 0.0, 0.34, 0.8, 500, 3500, 200, 0.08)
+	_tone(b, 0.02, 0.3, 700, 1500, TRI, 0.5, 0.01, 1, 0.5, 22.0, 0.06)
+	s["monkey_leap"] = [_wav(b, "monkey_leap")]
+
+	b = _buf(0.42)  # knocked off the wall: thump and a deflating squeak
+	_tone(b, 0.0, 0.2, 150, 48, SIN, 1.0, 0.002)
+	_noise(b, 0.0, 0.1, 0.7, 1500, 300)
+	_tone(b, 0.07, 0.33, 1300, 420, TRI, 0.4, 0.005, 1, 0.5, 18.0, 0.05)
+	s["monkey_thud"] = [_wav(b, "monkey_thud")]
+
+	b = _buf(0.34)  # hard hat: a bright bucket clang
+	_noise(b, 0.0, 0.012, 0.7, 8000, 4000, 2000)
+	_tone(b, 0.0, 0.3, 1150, 1140, SIN, 0.7, 0.001, 4)
+	_tone(b, 0.0, 0.22, 1730, 1720, SIN, 0.5, 0.001, 4)
+	_tone(b, 0.0, 0.14, 2410, 2400, TRI, 0.35, 0.001, 4)
+	s["helmet_clang"] = [_wav(b, "helmet_clang")]
+
+	b = _buf(0.55)  # ... and the hat coming off: lower clang, then a boing
+	_noise(b, 0.0, 0.012, 0.7, 8000, 4000, 2000)
+	_tone(b, 0.0, 0.3, 820, 800, SIN, 0.7, 0.001, 4)
+	_tone(b, 0.0, 0.2, 1310, 1290, SIN, 0.5, 0.001, 4)
+	_tone(b, 0.08, 0.45, 300, 560, SIN, 0.5, 0.004, 2, 0.5, 26.0, 0.07)
+	s["helmet_off"] = [_wav(b, "helmet_off")]
+
+	b = _buf(0.26)  # riot shield: dull plastic thunk, no ring ("that did nothing")
+	_noise(b, 0.0, 0.03, 0.9, 3000, 800, 300)
+	_tone(b, 0.0, 0.16, 400, 330, SQR, 0.5, 0.001, 4, 0.25)
+	_tone(b, 0.0, 0.07, 1900, 1700, TRI, 0.3, 0.001, 4)
+	s["shield_clang"] = [_wav(b, "shield_clang")]
+
+	b = _buf(0.36)  # vendor: "hup!" and a whoosh
+	_growl(b, 0.0, 0.16, 190, 260, 170, 0.9, 1500, 900, 0, 0.0, 0.01, 0.05, false)
+	_noise(b, 0.08, 0.27, 0.7, 600, 2800, 200, 0.06)
+	s["vendor_throw"] = [_wav(b, "vendor_throw")]
+
+	b = _buf(0.4)  # ketchup and mustard everywhere
+	_noise(b, 0.0, 0.3, 1.0, 3000, 250, 0, 0.002)
+	_tone(b, 0.0, 0.16, 210, 70, SIN, 0.7, 0.002)
+	_noise(b, 0.05, 0.3, 0.3, 1200, 500, 300, 0.02, 1)
+	s["splat"] = [_wav(b, "splat")]
+
+	b = _buf(0.72)  # cabbie: honk-hoonk (the charge telegraph)
+	for h: Array in [[0.0, 0.17], [0.26, 0.42]]:
+		_tone(b, h[0], h[1], 440, 440, SQR, 0.5, 0.004, 0, 0.4)
+		_tone(b, h[0], h[1], 554, 554, SQR, 0.45, 0.004, 0, 0.4)
+		_tone(b, h[0], h[1], 220, 220, SAW, 0.25, 0.004, 0)
+	s["taxi_honk"] = [_wav(b, "taxi_honk")]
+
+	b = _buf(0.2)  # rat: two quick squeaks
+	_tone(b, 0.0, 0.07, 2600, 3500, TRI, 0.6, 0.003, 1)
+	_tone(b, 0.1, 0.08, 2900, 3900, TRI, 0.6, 0.003, 1)
+	s["rat_squeak"] = [_wav(b, "rat_squeak")]
 
 # The sounds of the found weapons, the gadgets and the drops. Kept short: every sample is
 # computed in script at start-up.
